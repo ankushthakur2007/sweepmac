@@ -1,0 +1,12 @@
+[package]
+name = "sweepmac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sweep-core = { path = "../sweep-core" }
+sweep-scanners = { path = "../sweep-scanners" }
+sweep-health = { path = "../sweep-health" }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+cocoa = "0.25"
+objc = "0.2"

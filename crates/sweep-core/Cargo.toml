@@ -1,0 +1,8 @@
+[package]
+name = "sweep-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trash = "5"
+walkdir = "2"

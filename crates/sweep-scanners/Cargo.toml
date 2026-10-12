@@ -1,0 +1,9 @@
+[package]
+name = "sweep-scanners"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sweep-core = { path = "../sweep-core" }
+walkdir = "2"
+plist = "1"

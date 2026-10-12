@@ -1,0 +1,6 @@
+target/
+SweepMac.app/
+*.log
+.DS_Store
+TODOS.md
+AGENTS.md

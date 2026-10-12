@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/sweep-core", "crates/sweep-scanners", "crates/sweep-shell", "crates/sweep-helper", "crates/sweep-health"]
+resolver = "2"
