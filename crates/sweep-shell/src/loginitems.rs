@@ -1,23 +1,130 @@
-//! Tray autostart via ServiceManagement's `SMAppService` (macOS 13+).
-//!
-//! Raw `msg_send` against the `SMAppService` class; the ServiceManagement
-//! framework itself is linked from `build.rs`. Single-process app: the MAIN
-//! app registers itself (no bundled helper needed).
+//! Autostart via a user LaunchAgent plist + launchctl. Works fully unsigned
+//! (SMAppService needs a paid Developer ID and throws without one, so the
+//! app manages its own agent instead — same result, no certificate).
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginState {
     NotRegistered,
     Enabled,
     RequiresApproval,
-    /// App isn't Developer-ID signed: SMAppService throws instead of
-    /// answering, so don't call it at all.
+    /// Kept for API compatibility; LaunchAgent path needs no signing.
     Unsigned,
     Unknown(i64),
 }
 
-/// Team ID of the running binary, if Developer-ID signed. SMAppService and
-/// friends throw instead of answering on ad-hoc builds, so callers must
-/// check this first. Cached: codesign runs once per process.
+/// Pure mapping from probe results. Kept separate so it stays unit-tested
+/// without touching system login-item state.
+pub fn map_status(raw: i64) -> LoginState {
+    match raw {
+        0 => LoginState::NotRegistered,
+        1 => LoginState::Enabled,
+        2 => LoginState::RequiresApproval,
+        other => LoginState::Unknown(other),
+    }
+}
+
+const LABEL: &str = "com.sweepmac.app";
+
+fn home() -> PathBuf {
+    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+fn agent_plist() -> PathBuf {
+    home().join(format!("Library/LaunchAgents/{LABEL}.plist"))
+}
+
+fn uid() -> Option<String> {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn plist_body(exe: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{exe}</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn is_loaded() -> bool {
+    let Some(uid) = uid() else { return false };
+    std::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{LABEL}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+pub fn status() -> LoginState {
+    if !agent_plist().is_file() {
+        return LoginState::NotRegistered;
+    }
+    if is_loaded() {
+        LoginState::Enabled
+    } else {
+        // Plist present but not loaded (e.g. after an update): report off;
+        // enabling rewrites + bootstraps cleanly.
+        LoginState::NotRegistered
+    }
+}
+
+pub fn set_enabled(enable: bool) -> Result<String, String> {
+    let plist = agent_plist();
+    let Some(uid) = uid() else {
+        return Err("cannot determine user id".to_string());
+    };
+    if enable {
+        // Point at THIS binary, so dev and installed builds both work.
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        if let Some(p) = plist.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&plist, plist_body(&exe.to_string_lossy())).map_err(|e| e.to_string())?;
+        // Clear any stale registration first (idempotent).
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+            .output();
+        let out = std::process::Command::new("launchctl")
+            .args(["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if is_loaded() {
+            Ok("autostart on".to_string())
+        } else {
+            Err(format!(
+                "bootstrap failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    } else {
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+            .output();
+        std::fs::remove_file(&plist).ok();
+        Ok("autostart off".to_string())
+    }
+}
+
+// team_id stays for future signed builds (SMAppService path); unused for now.
+#[allow(dead_code)]
 pub fn team_id() -> Option<String> {
     static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     CACHE
@@ -32,9 +139,6 @@ pub fn team_id() -> Option<String> {
             for line in err.lines() {
                 if let Some(v) = line.strip_prefix("TeamIdentifier=") {
                     let v = v.trim();
-                    // Ad-hoc/unsigned builds report "not set" (or nothing at
-                    // all): SMAppService throws on those, so treat as absent.
-                    // Real team IDs are 10 alphanumerics (e.g. S8EX82NJP6).
                     if v.len() == 10 && v.chars().all(|c| c.is_ascii_alphanumeric()) {
                         return Some(v.to_string());
                     }
@@ -44,103 +148,10 @@ pub fn team_id() -> Option<String> {
         })
         .clone()
 }
-pub fn map_status(raw: i64) -> LoginState {
-    match raw {
-        0 => LoginState::NotRegistered,
-        1 => LoginState::Enabled,
-        2 => LoginState::RequiresApproval,
-        other => LoginState::Unknown(other),
-    }
-}
 
-#[cfg(target_os = "macos")]
-mod imp {
-    use objc::runtime::{Class, Object};
-    use objc::{msg_send, sel, sel_impl};
-
-    use super::{map_status, team_id, LoginState};
-
-    fn service() -> Option<*mut Object> {
-        // Single-process app now: register the main app itself. (The old
-        // loginItemServiceWithIdentifier:… path needs a bundled helper and
-        // reports status 3/notFound without one.)
-        unsafe {
-            let cls: &Class = Class::get("SMAppService")?;
-            let svc: *mut Object = msg_send![cls, mainApp];
-            if svc.is_null() {
-                None
-            } else {
-                Some(svc)
-            }
-        }
-    }
-
-    pub fn status() -> LoginState {
-        if team_id().is_none() {
-            return LoginState::Unsigned;
-        }
-        unsafe {
-            match service() {
-                None => LoginState::Unknown(-1),
-                Some(svc) => {
-                    let raw: isize = msg_send![svc, status];
-                    map_status(raw as i64)
-                }
-            }
-        }
-    }
-
-    pub fn set_enabled(enable: bool) -> Result<String, String> {
-        if team_id().is_none() {
-            return Err("needs a Developer ID–signed build".to_string());
-        }
-        unsafe {
-            let svc = service().ok_or_else(|| "SMAppService unavailable".to_string())?;
-            // NULL error out-param: we report the post-call status instead.
-            let err: *mut *mut Object = std::ptr::null_mut();
-            if enable {
-                let _ok: bool = msg_send![svc, registerAndReturnError: err];
-                match status() {
-                    LoginState::Enabled => Ok("approved".to_string()),
-                    LoginState::RequiresApproval => {
-                        Ok("needs approval in System Settings".to_string())
-                    }
-                    LoginState::Unsigned => Err("needs a Developer ID–signed build".to_string()),
-                    LoginState::NotRegistered => Err("registration failed".to_string()),
-                    LoginState::Unknown(v) => {
-                        Err(format!("unexpected login item status: {v}"))
-                    }
-                }
-            } else {
-                let ok: bool = msg_send![svc, unregisterAndReturnError: err];
-                if ok {
-                    Ok("removed".to_string())
-                } else {
-                    Err("failed to remove login item".to_string())
-                }
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub use imp::{set_enabled, status};
-
-#[cfg(not(target_os = "macos"))]
-pub fn status() -> LoginState {
-    LoginState::NotRegistered
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn set_enabled(_enable: bool) -> Result<String, String> {
-    Err("login items require macOS".to_string())
-}
-
-// No round-trip tests: register/unregister mutates real system login-item
-// state, so only the pure status mapping below is tested.
 #[cfg(test)]
 mod tests {
-    use super::{map_status, team_id, LoginState};
+    use super::{map_status, LoginState};
 
     #[test]
     fn maps_known_statuses() {
@@ -149,5 +160,13 @@ mod tests {
         assert_eq!(map_status(2), LoginState::RequiresApproval);
         assert_eq!(map_status(3), LoginState::Unknown(3));
         assert_eq!(map_status(-1), LoginState::Unknown(-1));
+    }
+
+    #[test]
+    fn plist_body_points_at_given_binary() {
+        let xml = super::plist_body("/Applications/SweepMac.app/Contents/MacOS/sweepmac");
+        assert!(xml.contains("<string>com.sweepmac.app</string>"));
+        assert!(xml.contains("/Applications/SweepMac.app/Contents/MacOS/sweepmac"));
+        assert!(xml.contains("<true/>"));
     }
 }
