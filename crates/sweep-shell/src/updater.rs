@@ -1,40 +1,51 @@
-//! Update feed check: curls a JSON feed, compares against CURRENT.
-//!
-//! Feed format (ours): a flat JSON object with exactly three string keys:
-//! `{"version": "0.3.0", "url": "https://…/SweepMac-0.3.0.dmg", "notes": "…"}`
-//! Whitespace/order irrelevant; extra keys ignored; `\"`/`\\`/`\n` etc.
-//! escapes inside values are unescaped. Anything else is malformed.
+//! Update check: GitHub Releases API (`/releases/latest`) — the standard
+//! plumbing for apps shipped from a GitHub repo, so there is no self-hosted
+//! feed to maintain. `tag_name` (v-prefixed) is compared against CURRENT and
+//! `html_url` is the release page; the top-level `html_url` serializes before
+//! any nested ones (author/assets), so first-match extraction is correct.
+//! Drafts/prereleases are excluded by `latest` itself.
 
 use std::process::Command;
 
 /// Version comparison base — derived so Cargo and the updater can't drift.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// No feed is hosted yet: None hides the "Check for updates" button.
-/// Flip to Some("https://sweepmac.app/feed.json") when the feed is real.
-pub const FEED: Option<&str> = None;
+/// Latest-release endpoint; the "Check for updates" button renders only
+/// while this is Some (set to None to hide the button again).
+pub const FEED: Option<&str> =
+    Some("https://api.github.com/repos/ankushthakur2007/sweepmac/releases/latest");
 
 #[derive(Debug)]
 pub struct Release {
     pub version: String,
     pub url: String,
-    pub notes: String,
 }
 
-pub fn check(feed_url: &str) -> Result<Option<Release>, String> {
+pub fn check(endpoint: &str) -> Result<Option<Release>, String> {
     let out = Command::new("/usr/bin/curl")
-        .args(["-sL", "--max-time", "15", feed_url])
+        .args([
+            "-sL",
+            "--max-time",
+            "15",
+            "-H",
+            "User-Agent: SweepMac-updater",
+            endpoint,
+        ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
     if !out.status.success() {
         return Err(format!("curl exited with {}", out.status));
     }
-    let body = String::from_utf8(out.stdout).map_err(|e| format!("malformed feed: {e}"))?;
-    let version = extract(&body, "version").ok_or("malformed feed: missing \"version\"")?;
-    let url = extract(&body, "url").ok_or("malformed feed: missing \"url\"")?;
-    let notes = extract(&body, "notes").ok_or("malformed feed: missing \"notes\"")?;
+    let body = String::from_utf8(out.stdout).map_err(|e| format!("malformed response: {e}"))?;
+    // A 403/404 payload carries GitHub's own "message" — surface it verbatim
+    // (rate-limit explanations are the common case for an anonymous client).
+    let version = extract(&body, "tag_name").ok_or_else(|| {
+        let why = extract(&body, "message").unwrap_or_else(|| "unexpected response".into());
+        format!("no release found: {why}")
+    })?;
+    let url = extract(&body, "html_url").ok_or("malformed response: missing \"html_url\"")?;
     if cmp_version(&version, CURRENT) > 0 {
-        Ok(Some(Release { version, url, notes }))
+        Ok(Some(Release { version, url }))
     } else {
         Ok(None)
     }
@@ -107,37 +118,67 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn feed_file(body: &str) -> String {
+    fn gh_response(body: &str) -> String {
         let mut p = std::env::temp_dir();
-        p.push(format!("sweep-feed-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        p.push(format!("sweep-gh-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         format!("file://{}", p.display())
     }
 
     #[test]
-    fn newer_returns_release() {
-        let url = feed_file(r#"{"version":"9.9.9","url":"https://x/y.dmg","notes":"hi"}"#);
+    fn newer_tag_yields_release() {
+        let url = gh_response(r#"{"html_url":"https://github.com/u/r/releases/tag/v9.9.9","tag_name":"v9.9.9","body":"notes"}"#);
         let r = check(&url).unwrap().expect("expected Some");
-        assert_eq!(r.version, "9.9.9");
+        assert_eq!(r.version, "v9.9.9");
+        assert_eq!(r.url, "https://github.com/u/r/releases/tag/v9.9.9");
     }
 
     #[test]
-    fn same_returns_none() {
-        let url = feed_file(&format!(r#"{{"notes":"n","url":"https://x","version":"{CURRENT}"}}"#));
+    fn same_tag_returns_none() {
+        let url = gh_response(&format!(r#"{{"html_url":"https://x","tag_name":"v{CURRENT}"}}"#));
         assert!(check(&url).unwrap().is_none());
     }
 
     #[test]
-    fn malformed_is_err() {
-        let url = feed_file(r#"{"version": 123}"#);
-        assert!(check(&url).unwrap_err().contains("malformed"));
+    fn real_key_order_prefers_toplevel_html_url() {
+        // GitHub serializes url/assets_url/upload_url/html_url/id/author… —
+        // author's nested html_url must not win over the top-level one.
+        let url = gh_response(
+            r#"{"url":"https://api.github.com/repos/u/r/releases/1","html_url":"https://github.com/u/r/releases/tag/v9.9.9","author":{"login":"u","html_url":"https://github.com/u"},"tag_name":"v9.9.9"}"#,
+        );
+        let r = check(&url).unwrap().expect("Some");
+        assert_eq!(r.url, "https://github.com/u/r/releases/tag/v9.9.9");
     }
 
     #[test]
-    fn nested_same_name_key_is_skipped() {
-        let url = feed_file(r#"{"meta": {"version": 2}, "version": "9.9.9", "url": "https://x/y.dmg", "notes": "n"}"#);
-        let r = check(&url).unwrap().expect("real version wins");
-        assert_eq!(r.version, "9.9.9");
+    fn rate_limit_message_is_surfaced() {
+        let url = gh_response(r#"{"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"https://docs.github.com"}"#);
+        let err = check(&url).unwrap_err();
+        assert!(err.contains("API rate limit exceeded"), "{err}");
+    }
+
+    #[test]
+    fn missing_html_url_is_err() {
+        let url = gh_response(r#"{"tag_name":"v9.9.9"}"#);
+        assert!(check(&url).unwrap_err().contains("html_url"));
+    }
+
+    #[test]
+    fn malformed_non_json_is_err() {
+        let url = gh_response("<html>gateway error</html>");
+        assert!(check(&url).unwrap_err().contains("no release found"));
+    }
+
+    /// Live call against the real endpoint — run manually:
+    /// `cargo test -p sweepmac updater::tests::live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live() {
+        let r = check(FEED.expect("feed enabled")).expect("endpoint reachable");
+        match r {
+            Some(rel) => println!("update available: {} {}", rel.version, rel.url),
+            None => println!("up to date against {CURRENT}"),
+        }
     }
 }

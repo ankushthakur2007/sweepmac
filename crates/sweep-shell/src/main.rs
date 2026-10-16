@@ -727,8 +727,7 @@ impl SweepApp {
                     }
                 }
             }
-            // Self-update: hidden until updater::FEED points at a real feed —
-            // the placeholder URL only ever rendered "check failed".
+            // Self-update via GitHub releases (works while FEED is Some).
             if let Some(feed) = updater::FEED {
                 if ui.small_button("Check for updates").clicked() && !self.update_busy {
                     self.update_busy = true;
@@ -736,7 +735,13 @@ impl SweepApp {
                     let ctx2 = ctx.clone();
                     thread::spawn(move || {
                         let msg = match updater::check(feed) {
-                            Ok(Some(r)) => format!("Update {}: {}\n{}", r.version, r.url, r.notes),
+                            Ok(Some(r)) => {
+                                // Standard behavior: hand the user the release page.
+                                let _ = std::process::Command::new("/usr/bin/open")
+                                    .arg(&r.url)
+                                    .spawn();
+                                format!("Update {} available — release page opened.", r.version)
+                            }
                             Ok(None) => "You're up to date.".into(),
                             Err(e) => format!("Update check failed: {e}"),
                         };
