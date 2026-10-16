@@ -54,11 +54,26 @@ pub fn save_to(dir: &Path, items: &[(PathBuf, u64, String)]) -> Result<PathBuf, 
     }
     out.push(']');
     std::fs::write(&dest, out).map_err(|e| e.to_string())?;
+    prune(dir);
     Ok(dest)
 }
 
+/// Snapshots are write-only pre-clean records: keep only the newest files so
+/// they can't pile up forever (listings stay internal — open the JSON in
+/// ~/.sweepmac/snapshots/ to inspect).
+const KEEP: usize = 10;
+
+fn prune(dir: &Path) {
+    let mut all = files_in(dir); // newest-first
+    if all.len() > KEEP {
+        for old in all.split_off(KEEP) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
 /// Snapshot files in an explicit dir, newest-first.
-pub fn list_in(dir: &Path) -> Vec<PathBuf> {
+fn files_in(dir: &Path) -> Vec<PathBuf> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .ok()
         .map(|rd| {
@@ -80,11 +95,6 @@ pub fn list_in(dir: &Path) -> Vec<PathBuf> {
 /// Snapshot to the real dir.
 pub fn save(items: &[(PathBuf, u64, String)]) -> Result<PathBuf, String> {
     save_to(&dir(), items)
-}
-
-/// Real snapshots, newest-first.
-pub fn list() -> Vec<PathBuf> {
-    list_in(&dir())
 }
 
 #[cfg(test)]
@@ -117,12 +127,12 @@ mod tests {
     }
 
     #[test]
-    fn list_newest_first() {
+    fn files_in_newest_first() {
         let d = tmpdir();
         for name in ["100.json", "300.json", "200.json"] {
             std::fs::write(d.join(name), "[]").unwrap();
         }
-        let got: Vec<String> = list_in(&d)
+        let got: Vec<String> = files_in(&d)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -132,6 +142,20 @@ mod tests {
 
     #[test]
     fn missing_dir_lists_empty() {
-        assert!(list_in(&tmpdir().join("nope")).is_empty());
+        assert!(files_in(&tmpdir().join("nope")).is_empty());
+    }
+
+    #[test]
+    fn save_prunes_to_keep_newest() {
+        let d = tmpdir();
+        // 10-digit names sort like real <unix-ts>.json names.
+        for i in 1_000_000_000..1_000_000_015u32 {
+            std::fs::write(d.join(format!("{i}.json")), "[]").unwrap();
+        }
+        let dest = save_to(&d, &[(PathBuf::from("/a"), 1, "c".into())]).unwrap();
+        let left = files_in(&d);
+        assert_eq!(left.len(), KEEP, "prune should keep only {KEEP}");
+        assert!(dest.exists(), "the just-written snapshot must survive");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -7,7 +7,12 @@
 
 use std::process::Command;
 
-pub const CURRENT: &str = "0.2.0";
+/// Version comparison base — derived so Cargo and the updater can't drift.
+pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
+
+/// No feed is hosted yet: None hides the "Check for updates" button.
+/// Flip to Some("https://sweepmac.app/feed.json") when the feed is real.
+pub const FEED: Option<&str> = None;
 
 #[derive(Debug)]
 pub struct Release {

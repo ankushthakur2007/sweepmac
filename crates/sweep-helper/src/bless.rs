@@ -7,25 +7,6 @@ pub fn requirement_string(team_id: &str, label: &str) -> String {
     )
 }
 
-/// True if bundled `candidate` CFBundleVersion sorts after `installed`.
-/// Numeric per dot-separated component; missing trailing parts count as 0.
-pub fn is_newer(candidate: &str, installed: &str) -> bool {
-    fn parts(v: &str) -> Vec<u64> {
-        v.split('.')
-            .map(|c| c.parse::<u64>().unwrap_or(0))
-            .collect()
-    }
-    let (a, b) = (parts(candidate.trim()), parts(installed.trim()));
-    let n = a.len().max(b.len());
-    for i in 0..n {
-        let (x, y) = (*a.get(i).unwrap_or(&0), *b.get(i).unwrap_or(&0));
-        if x != y {
-            return x > y;
-        }
-    }
-    false
-}
-
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -55,17 +36,6 @@ mod tests {
             requirement_string("ABC123DEFG", "com.sweepmac.helper"),
             "anchor apple generic and identifier \"com.sweepmac.helper\" and certificate leaf[subject.OU] = \"ABC123DEFG\""
         );
-    }
-
-    #[test]
-    fn version_compare_numeric() {
-        assert!(is_newer("0.2.0", "0.1.0"));
-        assert!(is_newer("0.1.1", "0.1.0"));
-        assert!(is_newer("0.1.10", "0.1.9"));
-        assert!(!is_newer("0.1.0", "0.1.0"));
-        assert!(!is_newer("0.1.0", "0.2.0"));
-        assert!(is_newer("0.1.0.1", "0.1.0"));
-        assert!(!is_newer("0.1.0", "0.1.0.0")); // trailing zeros equal
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Clutter scanner: oversized files, stale installers, and untouched downloads
 //! — system-scoped (whole drive minus SIP paths), like every other module.
 //! Conservative by default — only old installers are pre-selected.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use sweep_core::{home, JunkItem, Progress, Scanner};
@@ -53,6 +54,7 @@ fn is_system_skipped(p: &Path) -> bool {
         "/dev",
         "/etc",
         "/var",
+        "/Volumes", // mounted volumes must never be walked
     ];
     let s = p.to_string_lossy();
     SKIP.iter().any(|k| s == *k || s.starts_with(&format!("{k}/")))
@@ -75,6 +77,19 @@ fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
         let Some((category, selected)) = classify(entry.path(), md.len(), age, in_downloads) else { continue };
         out.push(JunkItem { path: entry.path().to_path_buf(), size: md.len(), category: category.into(), selected });
     }
+    out
+}
+
+/// Overlapping roots (/, /Users, ~/Downloads …) find the same file 2–3×;
+/// keep one row per path. Later roots win so ~/Downloads' stale-download
+/// rule survives the "/" walk. Also zeroes the tripled byte totals.
+fn dedupe_by_path(items: Vec<JunkItem>) -> Vec<JunkItem> {
+    let mut seen: HashMap<PathBuf, JunkItem> = HashMap::new();
+    for j in items {
+        seen.insert(j.path.clone(), j);
+    }
+    let mut out: Vec<JunkItem> = seen.into_values().collect();
+    out.sort_by(|a, b| b.size.cmp(&a.size));
     out
 }
 
@@ -116,8 +131,8 @@ impl Scanner for Clutter {
                 out.extend(scan_root(root, root == &downloads));
             }
         }
+        let out = dedupe_by_path(out);
         on_progress(Progress { done: total, total, bytes: out.iter().map(|j| j.size).sum(), label: "done".into() });
-        out.sort_by(|a, b| b.size.cmp(&a.size));
         out
     }
 }
@@ -194,5 +209,30 @@ mod tests {
         std::fs::File::create(hidden.join("big.bin")).unwrap().set_len(LARGE_BYTES + 1).unwrap();
         assert!(scan_root(&root, false).is_empty());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn overlapping_roots_dedupe_to_one_row() {
+        let root = tmp_root("overlap");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let big = nested.join("big.bin");
+        std::fs::File::create(&big).unwrap().set_len(LARGE_BYTES + 1).unwrap();
+        // Both the outer and the nested root find the same file.
+        let mut items = scan_root(&root, false);
+        items.extend(scan_root(&nested, false));
+        assert_eq!(items.len(), 2, "precondition: overlapping roots duplicate the file");
+        let out = dedupe_by_path(items);
+        assert_eq!(out.len(), 1, "duplicate rows must collapse: {out:?}");
+        assert_eq!(out[0].path, big);
+        assert_eq!(out[0].size, LARGE_BYTES + 1, "total must not be tripled");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mounted_volumes_never_walked() {
+        assert!(is_system_skipped(Path::new("/Volumes")));
+        assert!(is_system_skipped(Path::new("/Volumes/Backup/big.bin")));
+        assert!(!is_system_skipped(Path::new("/Users/me/Downloads")));
     }
 }

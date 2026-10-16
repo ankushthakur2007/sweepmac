@@ -33,6 +33,12 @@ pub fn brew() -> Option<PathBuf> {
     find_bin("brew")
 }
 
+/// (freshclam binary, config path) for the Protection page's
+/// "Update signatures" button — the lightweight path past full setup.
+pub fn freshclam_job() -> Option<(PathBuf, PathBuf)> {
+    Some((find_bin("freshclam")?, conf_dir().join("freshclam.conf")))
+}
+
 /// Which install step is still needed (pure seam for tests; no env access).
 /// Returns the log line `setup()` would send, or "" when nothing blocks it.
 fn needs_install(clamd_found: bool, brew_found: bool) -> &'static str {

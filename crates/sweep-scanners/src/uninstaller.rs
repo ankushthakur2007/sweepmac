@@ -84,6 +84,12 @@ fn leftovers_for(app: &AppInfo) -> Vec<PathBuf> {
     candidates_for(app, &home())
 }
 
+/// Orphan keys are reverse-DNS bundle ids (≥2 dots), never Apple system-app
+/// data (`com.apple.mediaanalysisd` etc.) — those apps are always present.
+fn is_orphan_key(key: &str) -> bool {
+    !key.starts_with("com.apple.") && key.matches('.').count() >= 2
+}
+
 pub struct Uninstaller;
 
 impl Scanner for Uninstaller {
@@ -145,8 +151,9 @@ impl Scanner for Uninstaller {
                 if installed.contains(&key) {
                     continue;
                 }
-                // Only flag reverse-DNS names (likely bundle ids), not plain folders.
-                if key.matches('.').count() >= 2 {
+                // Only flag reverse-DNS names (likely bundle ids), not plain folders,
+                // and never Apple system-app data (see protection.rs).
+                if is_orphan_key(&key) {
                     let size = if p.is_dir() { dir_size(&p, 8) } else { p.metadata().map(|m| m.len()).unwrap_or(0) };
                     if size > 1024 * 1024 {
                         out.push(JunkItem::new(p, size, "Orphan data"));
@@ -181,6 +188,14 @@ mod tests {
             "bare parent must never be a candidate: {got:?}"
         );
         std::fs::remove_dir_all(&h).ok();
+    }
+
+    #[test]
+    fn apple_system_data_is_never_an_orphan() {
+        assert!(!is_orphan_key("com.apple.mediaanalysisd"));
+        assert!(!is_orphan_key("com.apple.SoftwareUpdate"));
+        assert!(is_orphan_key("com.adobe.Reader")); // real orphan stays flagged
+        assert!(!is_orphan_key("plainfolder")); // non-reverse-DNS never flagged
     }
 
     #[test]

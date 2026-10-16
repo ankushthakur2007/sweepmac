@@ -1,12 +1,8 @@
-//! Menu-bar health sensors. CleanMyMac polls monitors on dual cadences
-//! (`init(timeInterval:backgroundTimeInterval:)`); we do the same but cheaper:
-//! values are computed on demand, cached, and refreshed at most every
-//! `BACKGROUND_SECS` in the background or on every menu open.
+//! Menu-bar health sensors. Values are computed on demand by `Sampler`:
+//! fast syscall sample every tick, slow sources (battery/thermal/bluetooth)
+//! merged on longer cadences.
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-pub const FOREGROUND_SECS: u64 = 15;
-pub const BACKGROUND_SECS: u64 = 300;
 
 /// One tile of health state.
 #[derive(Debug, Clone, Default)]
@@ -111,36 +107,46 @@ fn load() -> Option<f64> {
     Some(avg[0])
 }
 
-/// Total rx/tx bytes across physical + VPN interfaces (en*, utun*),
-/// one syscall via getifaddrs. AF_LINK filter counts each iface once.
+/// Pick which interface group to report: VPN tunnels (utun*) when any exist,
+/// since they carry the same bytes as the physical iface they route over —
+/// summing both roughly doubles displayed rates. Otherwise physical (en*).
+fn pick_net_totals(en: Option<(u64, u64)>, utun: Option<(u64, u64)>) -> (u64, u64) {
+    utun.or(en).unwrap_or((0, 0))
+}
+
+/// Total rx/tx bytes from VPN interfaces (utun*) when present, else physical
+/// (en*); other ifaces (awdl/llw/lo) skipped. One getifaddrs walk, AF_LINK
+/// filter counts each iface once.
 fn net_counters() -> Option<(u64, u64)> {
     unsafe {
         let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut head) != 0 || head.is_null() {
             return None;
         }
-        let mut rx: u64 = 0;
-        let mut tx: u64 = 0;
+        let mut en_tot: Option<(u64, u64)> = None;
+        let mut utun_tot: Option<(u64, u64)> = None;
         let mut cur = head;
         while !cur.is_null() {
             let ifa = &*cur;
-            let tracked = !ifa.ifa_name.is_null()
+            if !ifa.ifa_name.is_null()
                 && !ifa.ifa_addr.is_null()
                 && (*ifa.ifa_addr).sa_family as libc::c_int == libc::AF_LINK
                 && !ifa.ifa_data.is_null()
-                && {
-                    let n = std::ffi::CStr::from_ptr(ifa.ifa_name).to_bytes();
-                    n.starts_with(b"en") || n.starts_with(b"utun")
-                };
-            if tracked {
-                let d = &*(ifa.ifa_data as *const libc::if_data);
-                rx = rx.wrapping_add(d.ifi_ibytes as u64);
-                tx = tx.wrapping_add(d.ifi_obytes as u64);
+            {
+                let n = std::ffi::CStr::from_ptr(ifa.ifa_name).to_bytes();
+                let is_utun = n.starts_with(b"utun");
+                if is_utun || n.starts_with(b"en") {
+                    let d = &*(ifa.ifa_data as *const libc::if_data);
+                    let t = (if is_utun { &mut utun_tot } else { &mut en_tot })
+                        .get_or_insert((0, 0));
+                    t.0 = t.0.wrapping_add(d.ifi_ibytes as u64);
+                    t.1 = t.1.wrapping_add(d.ifi_obytes as u64);
+                }
             }
             cur = (*cur).ifa_next;
         }
         libc::freeifaddrs(head);
-        Some((rx, tx))
+        Some(pick_net_totals(en_tot, utun_tot))
     }
 }
 
@@ -260,18 +266,6 @@ impl Health {
         }
     }
 
-    /// Fresh sample. Each source is independent — one failing never blanks the rest.
-    /// Network rates stay None here (they need Sampler rate history).
-    pub fn sample() -> Self {
-        let mut h = Self::sample_fast();
-        let (battery_pct, battery_mins) = battery();
-        h.battery_pct = battery_pct;
-        h.battery_mins = battery_mins;
-        h.thermal = thermal();
-        h.bt_battery = bt_battery();
-        h
-    }
-
     /// Overall grade from factors (their Fair/Good/Excellent pattern, simplified).
     pub fn grade(&self) -> &'static str {
         let mut bad = 0;
@@ -292,12 +286,6 @@ impl Health {
             _ => "Poor",
         }
     }
-}
-
-/// Cached sample with dual cadence: foreground refresh every
-/// FOREGROUND_SECS, background at most every BACKGROUND_SECS.
-pub struct CachedHealth {
-    last: Option<(Health, Instant)>,
 }
 
 /// Realtime sampler: fast syscall sample every tick; slow battery + thermal
@@ -366,45 +354,24 @@ impl Sampler {
     }
 }
 
-impl CachedHealth {
-    pub fn new() -> Self {
-        Self { last: None }
-    }
-
-    /// Returns cached value if younger than `max_age`, else re-samples.
-    pub fn get(&mut self, max_age: Duration) -> Health {
-        let fresh = self.last.as_ref().is_some_and(|(_, t)| t.elapsed() < max_age);
-        if !fresh {
-            self.last = Some((Health::sample(), Instant::now()));
-        }
-        self.last.as_ref().unwrap().0.clone()
-    }
-
-    pub fn get_foreground(&mut self) -> Health {
-        self.get(Duration::from_secs(FOREGROUND_SECS))
-    }
-
-    pub fn get_background(&mut self) -> Health {
-        self.get(Duration::from_secs(BACKGROUND_SECS))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sample_never_panics_and_grades() {
-        let h = Health::sample();
+    fn sample_fast_never_panics_and_grades() {
+        let h = Health::sample_fast();
         assert!(["Good", "Fair", "Poor"].contains(&h.grade()));
     }
 
     #[test]
-    fn cache_serves_stale_within_age() {
-        let mut c = CachedHealth::new();
-        let a = c.get(Duration::from_secs(3600));
-        let b = c.get(Duration::from_secs(3600));
-        assert_eq!(a.grade(), b.grade());
+    fn vpn_tunnels_preferred_over_physical() {
+        // utun present: report it alone (en* would double-count its bytes).
+        assert_eq!(pick_net_totals(Some((100, 200)), Some((100, 200))), (100, 200));
+        assert_eq!(pick_net_totals(Some((100, 200)), Some((5, 6))), (5, 6));
+        // No VPN: fall back to en*.
+        assert_eq!(pick_net_totals(Some((100, 200)), None), (100, 200));
+        assert_eq!(pick_net_totals(None, None), (0, 0));
     }
 
     #[test]

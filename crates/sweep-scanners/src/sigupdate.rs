@@ -79,14 +79,15 @@ fn tail(s: &str) -> String {
     s[start..].to_string()
 }
 
-/// Run `freshclam`, giving it 120s. std has no process timeout, so the wait
-/// runs on a thread and `recv_timeout` bounds the block (a timed-out child is
-/// left running; freshclam is short-lived and idempotent).
-pub fn update_signatures(freshclam: &Path) -> Result<String, String> {
+/// Run `freshclam` with `args`, giving it 120s. std has no process timeout,
+/// so the wait runs on a thread and `recv_timeout` bounds the block (a
+/// timed-out child is left running; freshclam is short-lived and idempotent).
+pub fn update_signatures(freshclam: &Path, args: &[&str]) -> Result<String, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let fc = freshclam.to_path_buf();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(&fc).output();
+        let out = std::process::Command::new(&fc).args(&args).output();
         let _ = tx.send(out);
     });
     match rx.recv_timeout(std::time::Duration::from_secs(120)) {
@@ -207,13 +208,30 @@ mod tests {
     fn update_signatures_fake_freshclam() {
         let d = tmpdir("freshclam");
         let ok = make_exec(&d, "freshclam-ok", "#!/bin/sh\necho signatures updated\n");
-        let out = update_signatures(&ok).expect("fake freshclam should succeed");
+        let out = update_signatures(&ok, &[]).expect("fake freshclam should succeed");
         assert!(out.contains("signatures updated"), "{out}");
 
         let bad = make_exec(&d, "freshclam-bad", "#!/bin/sh\necho nope >&2\nexit 1\n");
-        let err = update_signatures(&bad).expect_err("exit 1 should fail");
+        let err = update_signatures(&bad, &[]).expect_err("exit 1 should fail");
         assert!(err.contains("nope"), "{err}");
 
-        assert!(update_signatures(&d.join("missing")).is_err());
+        assert!(update_signatures(&d.join("missing"), &[]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn update_signatures_passes_args() {
+        let d = tmpdir("args");
+        let fc = make_exec(
+            &d,
+            "freshclam-args",
+            "#!/bin/sh\n[ \"$1\" = \"--config-file\" ] && [ -n \"$2\" ] && echo ok || { echo bad >&2; exit 1; }\n",
+        );
+        let conf = d.join("freshclam.conf");
+        std::fs::write(&conf, "").unwrap();
+        let conf = conf.to_string_lossy().into_owned();
+        let out =
+            update_signatures(&fc, &["--config-file", conf.as_str()]).expect("args forwarded");
+        assert!(out.contains("ok"), "{out}");
     }
 }

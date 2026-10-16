@@ -31,18 +31,18 @@ enum Route {
 }
 
 impl Route {
-    fn meta() -> &'static [(Route, &'static str, &'static str, bool)] {
+    fn meta() -> &'static [(Route, &'static str, &'static str)] {
         use Route::*;
         &[
-            (Welcome, "Welcome", "First-run setup", true),
-            (SmartCare, "Smart Care", "All systems at a glance", true),
-            (Cleanup, "Cleanup", "Caches, logs, trash", true),
-            (Applications, "Applications", "Leftover app data", true),
-            (Privacy, "Privacy", "Browser data", true),
-            (Performance, "Performance", "Startup items audit", true),
-            (Protection, "Protection", "Suspicious files audit", true),
-            (Clutter, "My Clutter", "Old & large files", true),
-            (SpaceLens, "Space Lens", "Large folders", true),
+            (Welcome, "Welcome", "First-run setup"),
+            (SmartCare, "Smart Care", "All systems at a glance"),
+            (Cleanup, "Cleanup", "Caches, logs, trash"),
+            (Applications, "Applications", "Leftover app data"),
+            (Privacy, "Privacy", "Browser data"),
+            (Performance, "Performance", "Startup items audit"),
+            (Protection, "Protection", "Suspicious files audit"),
+            (Clutter, "My Clutter", "Old & large files"),
+            (SpaceLens, "Space Lens", "Large folders"),
         ]
     }
     fn scanners(&self) -> Vec<Box<dyn sweep_core::Scanner>> {
@@ -88,10 +88,22 @@ impl ModulePage {
                         let items: Vec<JunkItem> =
                             items.into_iter().filter(|i| !ignore::is_ignored(&i.path, &ignored)).collect();
                         let total: u64 = items.iter().map(|i| i.size).sum();
+                        // malware.rs reports unreadable/clamd-failed files in its
+                        // final progress label — never claim "clean" after one.
+                        let incomplete = self.progress.label.contains("could not be scanned");
                         self.status = if items.is_empty() {
-                            "Nothing found — this area is clean.".into()
+                            if incomplete {
+                                self.progress.label.clone()
+                            } else {
+                                "Nothing found — this area is clean.".into()
+                            }
                         } else {
-                            format!("Found {} items ({})", items.len(), fmt_bytes(total))
+                            let found = format!("Found {} items ({})", items.len(), fmt_bytes(total));
+                            if incomplete {
+                                format!("{found} · {}", self.progress.label)
+                            } else {
+                                found
+                            }
                         };
                         self.items = items;
                         self.busy = false;
@@ -113,25 +125,31 @@ impl ModulePage {
                 }
             }
         }
-        // Setup log stream (Protection page first-run flow).
+        // Setup log stream (Protection page first-run flow). Done is the
+        // sender dropping: substring-matching lines missed terminal errors
+        // ("Cannot write config files.") and left the page busy until restart.
         if let Some(rx) = &self.setup_rx {
-            while let Ok(line) = rx.try_recv() {
-                let finished = line.starts_with("Protected")
-                    || line.contains("already running")
-                    || line.contains("is up")
-                    || line.contains("failed")
-                    || line.contains("not found");
-                self.setup_log.push(line);
-                if self.setup_log.len() > 60 {
-                    let excess = self.setup_log.len() - 60;
-                    self.setup_log.drain(..excess);
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(line) => {
+                        self.setup_log.push(line);
+                        if self.setup_log.len() > 60 {
+                            let excess = self.setup_log.len() - 60;
+                            self.setup_log.drain(..excess);
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
                 }
-                if finished {
-                    self.status = cached_clam_status();
-                    self.busy = false;
-                    self.setup_rx = None;
-                    break;
-                }
+            }
+            if done {
+                self.status = cached_clam_status();
+                self.busy = false;
+                self.setup_rx = None;
             }
         }
         if finished {
@@ -220,6 +238,31 @@ fn cached_clam_status() -> String {
         *g = Some((sweep_scanners::clamsetup::status(), std::time::Instant::now()));
     }
     g.as_ref().unwrap().0.clone()
+}
+
+fn frame_cache() -> &'static std::sync::Mutex<BTreeMap<&'static str, (bool, std::time::Instant)>> {
+    static C: std::sync::Mutex<BTreeMap<&'static str, (bool, std::time::Instant)>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &C
+}
+
+/// The sidebar probes (launchctl, config file, disk reads) run on every
+/// update() — up to ~120/s while the mouse moves. Cache them 5s like the
+/// clam status; toggles invalidate so labels stay honest.
+fn cached5(key: &'static str, probe: fn() -> bool) -> bool {
+    let mut g = frame_cache().lock().unwrap();
+    let stale = g
+        .get(key)
+        .map(|(_, t)| t.elapsed() > std::time::Duration::from_secs(5))
+        .unwrap_or(true);
+    if stale {
+        g.insert(key, (probe(), std::time::Instant::now()));
+    }
+    g.get(key).unwrap().0
+}
+
+fn invalidate5(key: &'static str) {
+    frame_cache().lock().unwrap().remove(key);
 }
 
 fn onboarded_file() -> std::path::PathBuf {
@@ -311,6 +354,35 @@ impl SweepApp {
                         sweep_scanners::clamsetup::setup(tx);
                     });
                 }
+                if ui.add_enabled(!running, egui::Button::new("Update signatures")).clicked() {
+                    let (tx, rx) = mpsc::channel::<String>();
+                    self.page_mut().setup_rx = Some(rx);
+                    self.page_mut().setup_log.clear();
+                    self.page_mut().busy = true;
+                    self.page_mut().status = "Updating signatures…".into();
+                    thread::spawn(move || {
+                        match sweep_scanners::clamsetup::freshclam_job() {
+                            None => {
+                                let _ = tx.send("freshclam not found — reinstall ClamAV.".into());
+                            }
+                            Some((bin, conf)) => {
+                                let conf = conf.to_string_lossy().into_owned();
+                                let args = ["--config-file", conf.as_str()];
+                                match sweep_scanners::sigupdate::update_signatures(&bin, &args) {
+                                    Ok(t) => {
+                                        for l in t.lines() {
+                                            let _ = tx.send(l.to_string());
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(format!("freshclam failed: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                        // tx drops here; pump() ends the busy state on disconnect.
+                    });
+                }
             });
             let log: Vec<String> = self.page_mut().setup_log.iter().rev().take(6).rev().cloned().collect();
             for line in log {
@@ -328,8 +400,12 @@ impl SweepApp {
                 self.page_mut().scan(route.scanners());
             }
             let has_sel = self.page_mut().items.iter().any(|i| i.selected);
+            // SpaceLens lists ~/Library, ~/Documents and friends: informational
+            // only, so it never gets a live clean button (one checkbox + click
+            // would otherwise trash a user-data root).
+            let cleanable = route != Route::SpaceLens;
             let clean_btn = ui.add_enabled(
-                !busy && has_sel,
+                !busy && has_sel && cleanable,
                 egui::Button::new(egui::RichText::new("Clean selected").color(egui::Color32::from_rgb(200, 40, 40))),
             );
             if clean_btn.clicked() {
@@ -437,14 +513,17 @@ impl SweepApp {
         let (tx, rx) = mpsc::channel::<(u8, Vec<JunkItem>)>();
         self.bulk_rx = Some(rx);
         self.bulk_busy = true;
-        for (route, _, _, live) in Route::meta() {
-            if *live && !matches!(route, Route::SmartCare | Route::Welcome) {
-                self.pages.entry(Self::key(*route)).or_default().busy = true;
+        for (route, _, _) in Route::meta() {
+            // Protection stays opt-in: its scan uploads every binary in
+            // /Applications to clamd — minutes behind a bare spinner.
+            if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
+                continue;
             }
+            self.pages.entry(Self::key(*route)).or_default().busy = true;
         }
         thread::spawn(move || {
-            for (route, _, _, live) in Route::meta() {
-                if !live || matches!(route, Route::SmartCare | Route::Welcome) {
+            for (route, _, _) in Route::meta() {
+                if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                     continue;
                 }
                 let mut all = Vec::new();
@@ -484,8 +563,8 @@ impl SweepApp {
             }
         });
         ui.separator();
-        for (route, label, _sub, live) in Route::meta() {
-            if !live || matches!(route, Route::SmartCare | Route::Welcome) {
+        for (route, label, _) in Route::meta() {
+            if matches!(route, Route::SmartCare | Route::Welcome) {
                 continue;
             }
             let key = Self::key(*route);
@@ -515,7 +594,7 @@ impl SweepApp {
         ui.add_space(8.0);
         ui.strong("Permissions");
         ui.label("Privacy and system caches need Full Disk Access (FDA). Without it, those scans return less.");
-        ui.label(format!("Full Disk Access: {}", if fda_granted() { "granted" } else { "limited" }));
+        ui.label(format!("Full Disk Access: {}", if cached5("fda", fda_granted) { "granted" } else { "limited" }));
         ui.horizontal(|ui| {
             if ui.button("Open System Settings").clicked() {
                 let _ = std::process::Command::new("open")
@@ -605,15 +684,8 @@ impl SweepApp {
             ui.heading("SweepMac");
             ui.label(egui::RichText::new("v0.2 · P2").weak());
             ui.separator();
-            for (route, label, sub, live) in Route::meta() {
+            for (route, label, sub) in Route::meta() {
                 if *route == Route::Welcome && self.route != Route::Welcome {
-                    continue;
-                }
-                if !live {
-                    ui.add_enabled_ui(false, |ui| {
-                        let _ = ui.selectable_label(false, format!("{label}  ·  {sub}"));
-                        let _ = ui.small(format!("{sub}"));
-                    });
                     continue;
                 }
                 let resp = ui.selectable_label(self.route == *route, *label);
@@ -627,23 +699,27 @@ impl SweepApp {
                 ui.add_space(2.0);
             }
             ui.separator();
-            // Start at login (SMAppService; single process now carries the menu).
+            // Start at login (user LaunchAgent — unsigned-friendly).
             {
-                let on = matches!(loginitems::status(), loginitems::LoginState::Enabled);
+                let on = cached5("login", || matches!(loginitems::status(), loginitems::LoginState::Enabled));
                 let label = if on { "Start at login: on" } else { "Start at login: off" };
                 if ui.small_button(label).clicked() {
                     match loginitems::set_enabled(!on) {
-                        Ok(m) => self.update_msg = Some(m),
+                        Ok(m) => {
+                            invalidate5("login");
+                            self.update_msg = Some(m);
+                        }
                         Err(e) => self.update_msg = Some(format!("Login item failed: {e}")),
                     }
                 }
             }
             // Menu-bar icon show/hide (persisted, applied live).
             {
-                let on = tray::menu_icon_enabled();
+                let on = cached5("menu_icon", tray::menu_icon_enabled);
                 let label = if on { "Menu bar icon: on" } else { "Menu bar icon: off" };
                 if ui.small_button(label).clicked() {
                     tray::set_menu_icon_enabled(!on);
+                    invalidate5("menu_icon");
                     if on {
                         tray::unmount();
                     } else {
@@ -651,27 +727,30 @@ impl SweepApp {
                     }
                 }
             }
-            // Self-update (feed URL is a placeholder until first release).
-            if ui.small_button("Check for updates").clicked() && !self.update_busy {
-                self.update_busy = true;
-                self.update_msg = Some("Checking…".into());
-                let ctx2 = ctx.clone();
-                thread::spawn(move || {
-                    let msg = match updater::check("https://sweepmac.app/feed.json") {
-                        Ok(Some(r)) => format!("Update {}: {}\n{}", r.version, r.url, r.notes),
-                        Ok(None) => "You're up to date.".into(),
-                        Err(e) => format!("Update check failed: {e}"),
-                    };
-                    UPDATE_RESULT.lock().unwrap().replace(msg);
-                    ctx2.request_repaint();
-                });
-            }
-            if self.update_busy {
-                if let Some(m) = UPDATE_RESULT.lock().unwrap().take() {
-                    self.update_msg = Some(m.clone());
-                    self.update_busy = false;
-                } else {
-                    ctx.request_repaint();
+            // Self-update: hidden until updater::FEED points at a real feed —
+            // the placeholder URL only ever rendered "check failed".
+            if let Some(feed) = updater::FEED {
+                if ui.small_button("Check for updates").clicked() && !self.update_busy {
+                    self.update_busy = true;
+                    self.update_msg = Some("Checking…".into());
+                    let ctx2 = ctx.clone();
+                    thread::spawn(move || {
+                        let msg = match updater::check(feed) {
+                            Ok(Some(r)) => format!("Update {}: {}\n{}", r.version, r.url, r.notes),
+                            Ok(None) => "You're up to date.".into(),
+                            Err(e) => format!("Update check failed: {e}"),
+                        };
+                        UPDATE_RESULT.lock().unwrap().replace(msg);
+                        ctx2.request_repaint();
+                    });
+                }
+                if self.update_busy {
+                    if let Some(m) = UPDATE_RESULT.lock().unwrap().take() {
+                        self.update_msg = Some(m.clone());
+                        self.update_busy = false;
+                    } else {
+                        ctx.request_repaint();
+                    }
                 }
             }
             if let Some(m) = &self.update_msg {
@@ -730,4 +809,43 @@ fn main() -> eframe::Result<()> {
         eframe::NativeOptions::default(),
         Box::new(|_cc| Ok(Box::new(SweepApp::default()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Setup flow ends when the sender drops — the exact case substring
+    // matching missed ("clamd started but not answering yet — retry shortly.").
+    #[test]
+    fn setup_pump_ends_on_disconnect_without_terminal_line() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let mut page = ModulePage {
+            setup_rx: Some(rx),
+            busy: true,
+            ..Default::default()
+        };
+        tx.send("clamd started but not answering yet — retry shortly.".into()).unwrap();
+        drop(tx); // setup thread ends without ever matching a "done" phrase
+        page.pump();
+        assert!(!page.busy, "disconnect must clear busy");
+        assert!(page.setup_rx.is_none());
+        assert_eq!(page.setup_log.len(), 1, "lines still land in the log");
+    }
+
+    #[test]
+    fn setup_pump_stays_busy_while_sender_alive_then_finishes() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let mut page = ModulePage {
+            setup_rx: Some(rx),
+            busy: true,
+            ..Default::default()
+        };
+        tx.send("Downloading signatures…".into()).unwrap();
+        page.pump();
+        assert!(page.busy && page.setup_rx.is_some(), "still running");
+        drop(tx);
+        page.pump();
+        assert!(!page.busy && page.setup_rx.is_none(), "sender gone = done");
+    }
 }

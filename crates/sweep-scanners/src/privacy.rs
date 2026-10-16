@@ -38,7 +38,10 @@ fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
         }
         push_file(&mut out, dir.join("History"), &format!("{browser} history"));
         push_file(&mut out, dir.join("History-journal"), &format!("{browser} history"));
-        push_file(&mut out, dir.join("Cookies"), &format!("{browser} cookies"));
+        // Chromium ≥96 keeps cookies under Network/; older versions at the profile root.
+        for rel in ["Cookies", "Cookies-journal", "Network/Cookies", "Network/Cookies-journal"] {
+            push_file(&mut out, dir.join(rel), &format!("{browser} cookies"));
+        }
     }
 
     on_progress(Progress {
@@ -102,9 +105,10 @@ mod tests {
             .join(format!("sweep-privacy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let chrome = root.join("Library/Application Support/Google/Chrome/Default");
-        std::fs::create_dir_all(&chrome).unwrap();
+        std::fs::create_dir_all(&chrome.join("Network")).unwrap();
         std::fs::write(chrome.join("History"), vec![0u8; 10]).unwrap();
-        std::fs::write(chrome.join("Cookies"), vec![0u8; 20]).unwrap();
+        std::fs::write(chrome.join("Cookies"), vec![0u8; 20]).unwrap(); // pre-96 layout
+        std::fs::write(chrome.join("Network/Cookies"), vec![0u8; 25]).unwrap(); // Chromium ≥96
         let ff = root.join("Library/Application Support/Firefox/Profiles/abc.default");
         std::fs::create_dir_all(&ff).unwrap();
         std::fs::write(ff.join("places.sqlite"), vec![0u8; 30]).unwrap();
@@ -116,6 +120,7 @@ mod tests {
         let items = scan_home(&root, &|_| {});
         assert!(items.iter().any(|j| j.category == "Chrome history" && j.size == 10));
         assert!(items.iter().any(|j| j.category == "Chrome cookies" && j.size == 20));
+        assert!(items.iter().any(|j| j.category == "Chrome cookies" && j.size == 25)); // Network/Cookies
         assert!(items.iter().any(|j| j.category == "Firefox history" && j.size == 30));
         assert!(items.iter().any(|j| j.category == "Firefox cookies" && j.size == 40));
         assert!(items.iter().any(|j| j.category == "Safari history" && j.size == 50));
