@@ -1,6 +1,6 @@
 ---
 title: "How I Built a Mac Cleaner in Rust (and Reverse-Engineered CleanMyMac's Safety Model)"
-published: false
+published: true
 description: "A native macOS cleaner in Rust + egui: menu-bar health monitor, ClamAV malware scanning, and the safety guardrails I extracted by reverse-engineering CleanMyMac."
 tags: rust, macos, opensource, egui
 canonical_url: https://github.com/ankushthakur2007/sweepmac
