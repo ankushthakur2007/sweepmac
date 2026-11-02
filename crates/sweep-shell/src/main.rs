@@ -758,6 +758,13 @@ impl SweepApp {
                     }
                 }
             }
+            // One-click "share on X" — opens a pre-filled tweet so users can
+            // spread the word without copy-pasting a URL.
+            if ui.small_button("Share on X").clicked() {
+                let text = "I'm using SweepMac — a free, open-source Mac cleaner (3.2 MB, no subscription). Everything goes to Trash, malware scan via ClamAV, menu-bar health monitor. https://github.com/ankushthakur2007/sweepmac";
+                let url = format!("https://twitter.com/intent/tweet?text={}", text.replace(' ', "%20"));
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+            }
             if let Some(m) = &self.update_msg {
                 ui.label(egui::RichText::new(m).small().weak());
             }
