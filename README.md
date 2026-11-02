@@ -30,6 +30,23 @@ bash packaging/bundle.sh # SweepMac.app (ad-hoc signed)
 Privacy/system-cache scans need Full Disk Access. Protection setup installs
 ClamAV via Homebrew on first visit (one click, ~300MB signatures).
 
+## Download
+
+Grab the DMG from [Releases](https://github.com/ankushthakur2007/sweepmac/releases/latest)
+(drag to Applications, then right-click → Open on first launch — ad-hoc signed).
+Apple Silicon, macOS 13+.
+
+## Safety (the part most cleaners skip)
+
+- **Trash-first** — everything moves to Trash, never hard-deleted
+- **SIP-aware** — `SF_RESTRICTED` paths are skipped on every scan walk
+- **Space Lens can't trash `~/Library`** — Clean button disabled on that route
+- **System-app data is never "orphan"** — `com.apple.*` keys skipped
+- **Pre-clean snapshots** — JSON manifest of every item before cleaning; aborts if save fails
+- **Ignore list** — per-item, persisted, respected by all scans
+- **Malware hits are never preselected** — opt-in cleaning only
+- **Unsigned build** — ad-hoc signed, no cert required to build/run
+
 ## Layout
 
 - `crates/sweep-core` — scan→clean pipeline traits
