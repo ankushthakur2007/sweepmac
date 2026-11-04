@@ -2,7 +2,7 @@
 //! Mirrors CleanMyMac's ApplicationsService leftover mapping (see REPLICA_PLAN.md).
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, unselected, JunkItem, Progress, Scanner};
+use sweep_core::{dir_size, home, unselected, Progress, ScanOutcome, Scanner};
 
 #[derive(Debug, Clone)]
 pub struct AppInfo {
@@ -136,7 +136,7 @@ impl Scanner for Uninstaller {
     fn name(&self) -> &'static str {
         "App Leftovers"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         on_progress(Progress {
             done: 0,
             total: 2,
@@ -161,7 +161,10 @@ impl Scanner for Uninstaller {
                 bytes: 0,
                 label: "done".into(),
             });
-            return out;
+            return ScanOutcome {
+                items: out,
+                incomplete: None,
+            };
         };
         for parent in [
             "Library/Application Support",
@@ -213,7 +216,10 @@ impl Scanner for Uninstaller {
             bytes: out.iter().map(|j| j.size).sum(),
             label: "done".into(),
         });
-        out
+        ScanOutcome {
+            items: out,
+            incomplete: None,
+        }
     }
 }
 

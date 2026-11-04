@@ -3,12 +3,19 @@
 //! of scope for now, so every item ships with `selected = false`.
 use std::path::{Path, PathBuf};
 
-use sweep_core::{file_size, home, unselected, JunkItem, Progress, Scanner};
+use sweep_core::{file_size, home, unselected, JunkItem, Progress, ScanOutcome, Scanner};
 
-fn disabled_dir() -> PathBuf {
-    home()
-        .map(|h| h.join(".sweepmac/disabled"))
-        .unwrap_or_else(|| PathBuf::from("/.sweepmac/disabled"))
+/// Read the launchd `Label` from a plist's bytes.
+fn plist_label(data: &[u8]) -> Option<String> {
+    let value = plist::from_bytes::<plist::Value>(data).ok()?;
+    let dict = value.as_dictionary()?;
+    dict.get("Label")
+        .and_then(|v| v.as_string())
+        .map(str::to_owned)
+}
+
+fn disabled_dir() -> Option<PathBuf> {
+    home().map(|h| h.join(".sweepmac/disabled"))
 }
 
 fn current_uid() -> Option<String> {
@@ -128,13 +135,18 @@ pub fn disable(item: &JunkItem) -> Result<String, String> {
     if item.path.extension().map(|x| x != "plist").unwrap_or(true) || !item.path.is_file() {
         return Err("loginwindow entries must be removed in System Settings".into());
     }
-    let label = item
-        .path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
+    let label = std::fs::read(&item.path)
+        .ok()
+        .as_deref()
+        .and_then(plist_label)
+        .or_else(|| {
+            item.path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+        })
         .ok_or_else(|| "loginwindow entries must be removed in System Settings".to_string())?;
-    let dest_dir = disabled_dir();
+    let dest_dir = disabled_dir().ok_or_else(|| "HOME unavailable".to_string())?;
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = (1..=100)
         .map(|n| backup_path(&dest_dir, &label, n))
@@ -174,7 +186,7 @@ pub fn restore(label: &str) -> Result<String, String> {
     if label.is_empty() || label.contains('/') || label.contains('\\') {
         return Err("invalid label".into());
     }
-    let dir = disabled_dir();
+    let dir = disabled_dir().ok_or_else(|| format!("no backup found for {label}"))?;
     let entries = std::fs::read_dir(&dir).map_err(|_| format!("no backup found for {label}"))?;
     let newest = entries
         .filter_map(|e| e.ok())
@@ -193,8 +205,8 @@ pub fn restore(label: &str) -> Result<String, String> {
         .map(|(_, _, p)| p)
         .ok_or_else(|| format!("no backup found for {label}"))?;
     let dest = home()
-        .map(|h| h.join("Library/LaunchAgents"))
-        .unwrap_or_else(|| PathBuf::from("/Library/LaunchAgents"))
+        .ok_or_else(|| "HOME unavailable".to_string())?
+        .join("Library/LaunchAgents")
         .join(format!("{label}.plist"));
     if dest.exists() {
         return Err(format!(
@@ -221,7 +233,7 @@ impl Scanner for Performance {
     fn name(&self) -> &'static str {
         "Startup Items"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         on_progress(Progress {
             done: 0,
             total: 1,
@@ -237,7 +249,10 @@ impl Scanner for Performance {
                     "/Library/LaunchAgents",
                 )));
                 out.sort_by(|a, b| b.size.cmp(&a.size));
-                return out;
+                return ScanOutcome {
+                    items: out,
+                    incomplete: None,
+                };
             }
         };
         let mut out = Vec::new();
@@ -255,7 +270,10 @@ impl Scanner for Performance {
             bytes: out.iter().map(|j| j.size).sum(),
             label: "done".into(),
         });
-        out
+        ScanOutcome {
+            items: out,
+            incomplete: None,
+        }
     }
 }
 
@@ -348,7 +366,7 @@ mod tests {
     #[test]
     fn full_scan_never_panics() {
         // No HOME stubbing: passes on any machine, real entries or not.
-        let items = Performance.scan(&|_| {});
+        let items = Performance.scan(&|_| {}).items;
         assert!(items
             .iter()
             .all(|i| i.category == "Login item" && !i.selected));
@@ -364,10 +382,10 @@ mod tests {
         std::fs::write(&src, AGENT_PLIST).unwrap();
         let item = unselected(src.clone(), file_size(&src), "Login item");
         let msg = disable(&item).expect("disable should succeed");
-        assert!(msg.contains("com.example.disableme"), "msg: {msg}");
+        assert!(msg.contains("com.example.testagent"), "msg: {msg}");
         assert!(!src.exists(), "original plist must be gone");
         assert!(fake_home
-            .join(".sweepmac/disabled/com.example.disableme.plist")
+            .join(".sweepmac/disabled/com.example.testagent.plist")
             .is_file());
         std::fs::remove_dir_all(&fake_home).ok();
     }
@@ -378,7 +396,7 @@ mod tests {
         let (_home, _lock) = HomeGuard::set(&fake_home);
         let agent_dir = fake_home.join("Library/LaunchAgents");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        let label = "com.example.twice";
+        let label = "com.example.testagent";
         let src = agent_dir.join(format!("{label}.plist"));
         std::fs::write(&src, AGENT_PLIST).unwrap();
         disable(&unselected(src.clone(), file_size(&src), "Login item")).unwrap();
@@ -401,7 +419,7 @@ mod tests {
         let (_home, _lock) = HomeGuard::set(&fake_home);
         let agent_dir = fake_home.join("Library/LaunchAgents");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        let label = "com.example.restoreme";
+        let label = "com.example.testagent";
         let src = agent_dir.join(format!("{label}.plist"));
         std::fs::write(&src, AGENT_PLIST).unwrap();
         disable(&unselected(src.clone(), file_size(&src), "Login item")).unwrap();

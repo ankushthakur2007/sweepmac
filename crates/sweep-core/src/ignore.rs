@@ -4,10 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Real ignore-list file.
-pub fn file() -> PathBuf {
-    crate::home()
-        .unwrap_or_else(|| std::path::PathBuf::from("/"))
-        .join(".sweepmac/ignored")
+pub fn file() -> Option<PathBuf> {
+    crate::home().map(|h| h.join(".sweepmac/ignored"))
 }
 
 fn norm(s: &str) -> String {
@@ -49,7 +47,7 @@ pub fn load() -> HashSet<String> {
     if crate::home().is_none() {
         return HashSet::new();
     }
-    load_from(&file())
+    load_from(&file().unwrap())
 }
 
 /// Persist the real ignore list.
@@ -57,7 +55,7 @@ pub fn save(set: &HashSet<String>) -> Result<(), String> {
     if crate::home().is_none() {
         return Err("HOME is not set".into());
     }
-    save_to(&file(), set)
+    save_to(&file().unwrap(), set)
 }
 
 /// Add one path to an explicit file.
@@ -76,7 +74,7 @@ pub fn add(path_str: &str) -> Result<(), String> {
     if crate::home().is_none() {
         return Err("HOME is not set".into());
     }
-    add_to(&file(), path_str)
+    add_to(&file().unwrap(), path_str)
 }
 
 /// Pure match: exact path or anything under an ignored dir.

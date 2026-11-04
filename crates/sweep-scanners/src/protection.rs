@@ -3,7 +3,7 @@
 //! `selected = false`.
 use std::path::Path;
 
-use sweep_core::{file_size, home, unselected, JunkItem, Progress, Scanner};
+use sweep_core::{file_size, home, unselected, JunkItem, Progress, ScanOutcome, Scanner};
 
 fn is_candidate_ext(p: &Path) -> bool {
     p.extension()
@@ -123,11 +123,12 @@ fn items_from_daemon_dir(dir: &Path) -> Vec<JunkItem> {
             if label.starts_with("com.apple.") {
                 return None;
             }
-            Some(unselected(
-                e.path().to_path_buf(),
-                file_size(e.path()),
-                "System daemon",
-            ))
+            {
+                let mut item =
+                    unselected(e.path().to_path_buf(), file_size(e.path()), "System daemon");
+                item.selectable = false;
+                Some(item)
+            }
         })
         .collect()
 }
@@ -141,7 +142,7 @@ impl Scanner for Protection {
     fn name(&self) -> &'static str {
         "Suspicious Files"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         const TOTAL: u64 = 3;
         let mut out = Vec::new();
         let total_bytes = |out: &[JunkItem]| out.iter().map(|j: &JunkItem| j.size).sum();
@@ -179,7 +180,10 @@ impl Scanner for Protection {
             bytes: total_bytes(&out),
             label: "done".into(),
         });
-        out
+        ScanOutcome {
+            items: out,
+            incomplete: None,
+        }
     }
 }
 
@@ -284,7 +288,7 @@ mod tests {
 
     #[test]
     fn full_scan_never_panics() {
-        let items = Protection.scan(&|_| {});
+        let items = Protection.scan(&|_| {}).items;
         assert!(items.iter().all(|i| !i.selected));
     }
 }

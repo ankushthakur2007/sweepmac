@@ -4,7 +4,7 @@ Free, open-source Mac cleaner in Rust. No telemetry, no account, no animations t
 
 ## What it does
 
-- **Cleanup** — caches, logs, trash (per-app breakdown)
+- **Cleanup** — caches, logs (per-app breakdown)
 - **Applications** — leftover data from uninstalled apps
 - **Privacy** — browser histories and cookies
 - **Performance** — startup/login items audit with reversible disable

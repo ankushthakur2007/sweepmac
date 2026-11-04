@@ -11,7 +11,7 @@ pub fn home() -> Option<PathBuf> {
 pub fn conf_dir() -> PathBuf {
     home()
         .map(|h| h.join(".sweepmac/clamav"))
-        .unwrap_or_else(|| PathBuf::from("/.sweepmac/clamav"))
+        .unwrap_or_else(|| std::env::temp_dir().join(".sweepmac/clamav"))
 }
 
 pub fn db_dir() -> PathBuf {
@@ -112,14 +112,20 @@ fn ping_clamd() -> bool {
 const RUN_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn run(cmd: &Path, args: &[&str], tx: &Sender<String>) -> bool {
+    use std::io::Read;
     tx.send(format!("$ {} {}", cmd.display(), args.join(" ")))
         .ok();
-    let child = match std::process::Command::new(cmd)
+    let mut cmd_builder = std::process::Command::new(cmd);
+    cmd_builder
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        cmd_builder.process_group(0);
+    }
+    let mut child = match cmd_builder.spawn() {
         Ok(c) => c,
         Err(e) => {
             tx.send(format!("failed to run {}: {e}", cmd.display()))
@@ -127,51 +133,70 @@ pub fn run(cmd: &Path, args: &[&str], tx: &Sender<String>) -> bool {
             return false;
         }
     };
-    let pid = child.id();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = child.wait_with_output();
-        let _ = done_tx.send(out);
-    });
-    match done_rx.recv_timeout(RUN_TIMEOUT) {
-        Ok(Ok(o)) => {
-            let tail = String::from_utf8_lossy(&o.stdout);
-            let tail: String = tail
-                .lines()
-                .rev()
-                .take(3)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !tail.is_empty() {
-                tx.send(tail).ok();
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut out_buf = String::new();
+                if let Some(mut s) = child.stdout.take() {
+                    let _ = s.read_to_string(&mut out_buf);
+                }
+                let tail: String = out_buf
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !tail.is_empty() {
+                    tx.send(tail).ok();
+                }
+                let mut err_buf = String::new();
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut err_buf);
+                }
+                if !err_buf.trim().is_empty() {
+                    tx.send(err_buf.trim().to_string()).ok();
+                }
+                return status.success();
             }
-            let err = String::from_utf8_lossy(&o.stderr);
-            if !err.trim().is_empty() {
-                tx.send(err.trim().to_string()).ok();
+            Ok(None) => {
+                if start.elapsed() >= RUN_TIMEOUT {
+                    #[cfg(unix)]
+                    {
+                        let pgid = child.id();
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &format!("-{}", pgid)])
+                            .status();
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tx.send(format!(
+                        "{} timed out after {}s",
+                        cmd.display(),
+                        RUN_TIMEOUT.as_secs()
+                    ))
+                    .ok();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
-            o.status.success()
-        }
-        Ok(Err(e)) => {
-            tx.send(format!("failed to run {}: {e}", cmd.display()))
-                .ok();
-            false
-        }
-        Err(_) => {
-            // Kill timed-out child.
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .output();
-            tx.send(format!(
-                "{} timed out after {}s",
-                cmd.display(),
-                RUN_TIMEOUT.as_secs()
-            ))
-            .ok();
-            false
+            Err(e) => {
+                #[cfg(unix)]
+                {
+                    let pgid = child.id();
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &format!("-{}", pgid)])
+                        .status();
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                tx.send(format!("failed to run {}: {e}", cmd.display()))
+                    .ok();
+                return false;
+            }
         }
     }
 }

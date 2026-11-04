@@ -36,7 +36,7 @@ impl Route {
         &[
             (Welcome, "Welcome", "First-run setup"),
             (SmartCare, "Smart Care", "All systems at a glance"),
-            (Cleanup, "Cleanup", "Caches, logs, trash"),
+            (Cleanup, "Cleanup", "Caches and logs"),
             (Applications, "Applications", "Leftover app data"),
             (Privacy, "Privacy", "Browser data"),
             (Performance, "Performance", "Startup items audit"),
@@ -79,7 +79,7 @@ struct ModulePage {
 
 impl ModulePage {
     fn pump(&mut self) {
-        let mut finished = false;
+        let mut saw_terminal = false;
         if let Some(rx) = &self.rx {
             loop {
                 match rx.try_recv() {
@@ -112,7 +112,8 @@ impl ModulePage {
                             };
                             self.items = items;
                             self.busy = false;
-                            finished = true;
+                            saw_terminal = true;
+                            break;
                         }
                         WorkerMsg::Incomplete(items, reason) => {
                             let ignored = ignore::load();
@@ -128,31 +129,42 @@ impl ModulePage {
                             };
                             self.items = items;
                             self.busy = false;
-                            finished = true;
+                            saw_terminal = true;
+                            break;
                         }
                         WorkerMsg::Cleaned(r) => {
                             for e in &r.errors {
                                 eprintln!("clean error: {e}");
                             }
-                            if r.errors.is_empty() {
-                                self.status =
-                                    "Moved to Trash. Undo from the Trash if needed.".into();
+                            if r.failed.is_empty() {
+                                if r.errors.is_empty() {
+                                    self.status =
+                                        "Moved to Trash. Undo from the Trash if needed.".into();
+                                } else {
+                                    self.status = format!(
+                                        "Finished with {} errors — press Scan to refresh.",
+                                        r.errors.len()
+                                    );
+                                }
                                 self.items.clear();
                             } else {
                                 self.status = format!(
                                     "Finished with {} errors — press Scan to refresh.",
                                     r.errors.len()
                                 );
+                                self.items.retain(|i| r.failed.contains(&i.path));
                             }
                             self.busy = false;
-                            finished = true;
+                            saw_terminal = true;
+                            break;
                         }
                     },
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        self.status = "Scan failed (worker crashed)".into();
-                        self.busy = false;
-                        finished = true;
+                        if !saw_terminal {
+                            self.status = "Scan failed (worker crashed)".into();
+                            self.busy = false;
+                        }
                         break;
                     }
                 }
@@ -185,7 +197,7 @@ impl ModulePage {
                 self.setup_rx = None;
             }
         }
-        if finished {
+        if saw_terminal {
             self.rx = None;
         }
     }
@@ -198,27 +210,32 @@ impl ModulePage {
         self.status = "Scanning…".into();
         thread::spawn(move || {
             let mut all = Vec::new();
-            let mut unavailable: Vec<String> = Vec::new();
+            let mut incomplete_reason: Option<String> = None;
             for s in &scanners {
-                if !s.is_available() {
-                    unavailable.push(s.name().to_string());
-                    continue;
-                }
                 let tag = s.name().to_string();
-                for item in s.scan(&|p| {
+                let outcome = s.scan(&|p| {
                     let _ = tx.send(WorkerMsg::Progress(Progress {
                         label: format!("{tag}: {}", p.label),
                         ..p
                     }));
-                }) {
+                });
+                for item in outcome.items {
                     all.push(item);
                 }
+                if let Some(r) = outcome.incomplete {
+                    incomplete_reason = Some(match incomplete_reason {
+                        Some(prev) => format!("{prev}; {r}"),
+                        None => r,
+                    });
+                }
             }
-            if unavailable.is_empty() {
-                let _ = tx.send(WorkerMsg::Done(all));
-            } else {
-                let reason = format!("{} not available", unavailable.join(", "));
-                let _ = tx.send(WorkerMsg::Incomplete(all, reason));
+            match incomplete_reason {
+                Some(reason) => {
+                    let _ = tx.send(WorkerMsg::Incomplete(all, reason));
+                }
+                None => {
+                    let _ = tx.send(WorkerMsg::Done(all));
+                }
             }
         });
     }
@@ -233,7 +250,7 @@ impl ModulePage {
             .iter()
             .map(|i| (i.path.clone(), i.size, i.category.clone()))
             .collect();
-        if let Err(e) = snapshot::save_to(&snapshot::dir(), &snap_items) {
+        if let Err(e) = snapshot::save(&snap_items) {
             self.status = format!("Snapshot failed ({e}) — clean aborted.");
             self.busy = false;
             return;
@@ -329,30 +346,35 @@ fn fda_granted() -> bool {
         .any(|sub| std::fs::read_dir(format!("{home}/{sub}")).is_ok())
 }
 
+fn plist_label(data: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(data);
+    let key = "<key>Label</key>";
+    let pos = text.find(key)?;
+    let rest = &text[pos + key.len()..];
+    let open = "<string>";
+    let close = "</string>";
+    let s = rest.find(open)? + open.len();
+    let e = rest[s..].find(close)?;
+    Some(rest[s..s + e].trim().to_string())
+}
+
 fn disabled_labels() -> Vec<String> {
-    let dir = sweep_core::home()
-        .unwrap_or_else(|| std::path::PathBuf::from("/"))
-        .join(".sweepmac/disabled");
+    let Some(dir) = sweep_core::home().map(|h| h.join(".sweepmac/disabled")) else {
+        return Vec::new();
+    };
     let mut labels = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.filter_map(|x| x.ok()) {
+            let path = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             if !name.ends_with(".plist") {
                 continue;
             }
             let stem = name.trim_end_matches(".plist");
-            let label = if let Some((prefix, num)) = stem.rsplit_once('-') {
-                if !prefix.is_empty()
-                    && num.chars().all(|c| c.is_ascii_digit())
-                    && num.parse::<u64>().map(|n| n >= 2).unwrap_or(false)
-                {
-                    prefix.to_string()
-                } else {
-                    stem.to_string()
-                }
-            } else {
-                stem.to_string()
-            };
+            let label = std::fs::read(&path)
+                .ok()
+                .and_then(|d| plist_label(&d))
+                .unwrap_or_else(|| stem.to_string());
             labels.insert(label);
         }
     }
@@ -562,7 +584,9 @@ impl SweepApp {
                 ui.strong(format!("Selected: {}", fmt_bytes(sel)));
                 if ui.small_button("All").clicked() {
                     for i in &mut page.items {
-                        i.selected = true;
+                        if i.selectable {
+                            i.selected = true;
+                        }
                     }
                 }
                 if ui.small_button("None").clicked() {
@@ -601,7 +625,10 @@ impl SweepApp {
                     let page = self.page_mut();
                     let item = &mut page.items[k];
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut item.selected, "");
+                        ui.add_enabled(
+                            item.selectable,
+                            egui::Checkbox::new(&mut item.selected, ""),
+                        );
                         ui.monospace(fmt_bytes(item.size));
                         ui.label(item.path.display().to_string());
                         if ui.small_button("Ignore").clicked() {
@@ -639,10 +666,6 @@ impl SweepApp {
             if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                 continue;
             }
-            let scanners = route.scanners();
-            if scanners.iter().any(|s| !s.is_available()) {
-                continue;
-            }
             self.pages.entry(Self::key(*route)).or_default().busy = true;
         }
         thread::spawn(move || {
@@ -651,12 +674,10 @@ impl SweepApp {
                     continue;
                 }
                 let scanners = route.scanners();
-                if scanners.iter().any(|s| !s.is_available()) {
-                    continue;
-                }
                 let mut all = Vec::new();
                 for s in scanners {
-                    for item in s.scan(&|_| {}) {
+                    let outcome = s.scan(&|_| {});
+                    for item in outcome.items {
                         all.push(item);
                     }
                 }
@@ -723,7 +744,7 @@ impl SweepApp {
             .weak(),
         );
         ui.add_space(8.0);
-        ui.label("• Reclaim space: caches, logs, trash, leftover app data, old downloads.");
+        ui.label("• Reclaim space: caches, logs, leftover app data, old downloads.");
         ui.label("• Stay private: browser histories and cookies (close browsers first).");
         ui.label(
             "• Stay safe: startup and protection areas are audit-first, reversible where possible.",
@@ -802,11 +823,12 @@ impl SweepApp {
             }
         }
         if self.bulk_rx.is_some() {
-            let msgs: Vec<(u8, Vec<JunkItem>)> = self
-                .bulk_rx
-                .as_ref()
-                .map(|rx| rx.try_iter().collect())
-                .unwrap_or_default();
+            let (msgs, disconnected) = {
+                let rx = self.bulk_rx.as_ref().unwrap();
+                let msgs: Vec<(u8, Vec<JunkItem>)> = rx.try_iter().collect();
+                let disconnected = matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+                (msgs, disconnected)
+            };
             let ignored = ignore::load();
             for (key, items) in msgs {
                 let items: Vec<JunkItem> = items
@@ -826,7 +848,19 @@ impl SweepApp {
                 }
                 self.totals.insert(key, (n, total));
             }
-            self.bulk_busy = self.pages.values().any(|p| p.busy);
+            if disconnected {
+                for (key, page) in self.pages.iter_mut() {
+                    if page.busy {
+                        page.status = "Scan failed (worker crashed)".into();
+                        page.busy = false;
+                        self.totals.remove(key);
+                    }
+                }
+                self.bulk_busy = false;
+                self.bulk_rx = None;
+            } else {
+                self.bulk_busy = self.pages.values().any(|p| p.busy);
+            }
         }
         if self.pages.values().any(|p| p.busy) {
             ctx.request_repaint();
@@ -925,7 +959,7 @@ impl SweepApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.route {
             Route::Welcome => self.render_welcome(ui),
             Route::SmartCare => self.render_dashboard(ui),
-            Route::Cleanup => self.render_page(ui, "Cleanup", "Caches, logs and trash. Everything goes to Trash — nothing is deleted outright."),
+            Route::Cleanup => self.render_page(ui, "Cleanup", "Caches and logs. Everything goes to Trash — nothing is deleted outright."),
             Route::Applications => self.render_page(ui, "Applications", "Data left behind by apps. Only flags leftovers of apps no longer installed, plus orphan bundle-id folders over 1 MB."),
             Route::Privacy => self.render_page(ui, "Privacy", "Browser histories and cookies. Close your browsers first for a complete clean."),
             Route::Performance => self.render_page(ui, "Performance", "Startup and login items. Disable moves the entry aside (reversible in ~/.sweepmac/disabled) — loginwindow entries must go via System Settings."),
@@ -1012,5 +1046,50 @@ mod tests {
         drop(tx);
         page.pump();
         assert!(!page.busy && page.setup_rx.is_none(), "sender gone = done");
+    }
+
+    // After a terminal Done message, a subsequent Disconnected from the
+    // dropped sender must NOT overwrite the successful status. (Audit #4 #3)
+    #[test]
+    fn pump_done_then_disconnect_does_not_overwrite() {
+        let (tx, rx) = mpsc::channel::<WorkerMsg>();
+        let mut page = ModulePage {
+            rx: Some(rx),
+            busy: true,
+            ..Default::default()
+        };
+        tx.send(WorkerMsg::Done(vec![])).unwrap();
+        page.pump();
+        assert!(!page.busy, "done cleared busy");
+        assert_eq!(page.status, "Nothing found — this area is clean.");
+        // Sender drops -> Disconnected must be ignored (already terminal).
+        drop(tx);
+        page.pump();
+        assert!(!page.busy);
+        assert_eq!(page.status, "Nothing found — this area is clean.");
+    }
+
+    // Partial cleanup retains only failed items. (Audit #4 #7)
+    #[test]
+    fn pump_cleaned_partial_retains_failed() {
+        use std::path::PathBuf;
+        let (tx, rx) = mpsc::channel::<WorkerMsg>();
+        let mut page = ModulePage {
+            rx: Some(rx),
+            busy: true,
+            items: vec![
+                JunkItem::new(PathBuf::from("/a"), 1, "c"),
+                JunkItem::new(PathBuf::from("/b"), 2, "c"),
+            ],
+            ..Default::default()
+        };
+        let mut r = sweep_core::CleanResult::default();
+        r.errors.push("/b: io error".into());
+        r.failed.push(PathBuf::from("/b"));
+        tx.send(WorkerMsg::Cleaned(r)).unwrap();
+        page.pump();
+        assert!(!page.busy);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path, PathBuf::from("/b"));
     }
 }

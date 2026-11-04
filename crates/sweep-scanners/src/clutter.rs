@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use sweep_core::{home, JunkItem, Progress, Scanner};
+use sweep_core::{home, JunkItem, Progress, ScanOutcome, Scanner};
 
 const LARGE_BYTES: u64 = 500 * 1024 * 1024;
 const INSTALLER_DAYS: u64 = 30;
@@ -93,6 +93,7 @@ fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
             size: md.len(),
             category: category.into(),
             selected,
+            selectable: true,
         });
     }
     out
@@ -120,9 +121,12 @@ impl Scanner for Clutter {
     fn name(&self) -> &'static str {
         "Old & Large Files"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        let h = home().unwrap_or_else(|| PathBuf::from("/"));
-        let downloads = h.join("Downloads");
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+        let h = home();
+        let downloads = h.as_ref().map(|h| h.join("Downloads")).unwrap_or_default();
+        let desktop = h.as_ref().map(|h| h.join("Desktop")).unwrap_or_default();
+        let documents = h.as_ref().map(|h| h.join("Documents")).unwrap_or_default();
+        let movies = h.as_ref().map(|h| h.join("Movies")).unwrap_or_default();
         // System-scoped like every other module: whole drive (SIP paths
         // pruned in scan_root), all users, apps, libraries — not just home.
         let roots = [
@@ -132,9 +136,9 @@ impl Scanner for Clutter {
             PathBuf::from("/Users"),
             PathBuf::from("/opt"),
             downloads.clone(),
-            h.join("Desktop"),
-            h.join("Documents"),
-            h.join("Movies"),
+            desktop,
+            documents,
+            movies,
         ];
         let total = roots.len() as u64;
         let mut out = Vec::new();
@@ -156,7 +160,10 @@ impl Scanner for Clutter {
             bytes: out.iter().map(|j| j.size).sum(),
             label: "done".into(),
         });
-        out
+        ScanOutcome {
+            items: out,
+            incomplete: None,
+        }
     }
 }
 

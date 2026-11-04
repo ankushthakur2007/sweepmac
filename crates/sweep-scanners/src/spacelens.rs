@@ -1,7 +1,7 @@
 //! SpaceLens scanner: top-level folder sizes under fixed roots.
 //! Informational only — items default to unselected, the user opts in.
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, JunkItem, Progress, Scanner};
+use sweep_core::{dir_size, home, JunkItem, Progress, ScanOutcome, Scanner};
 
 fn roots() -> Vec<PathBuf> {
     let Some(h) = home() else {
@@ -56,6 +56,7 @@ fn children_sizes(root: &Path) -> Vec<JunkItem> {
                 size,
                 category: "Folder".into(),
                 selected: false,
+                selectable: true,
             })
         })
         .collect()
@@ -70,7 +71,7 @@ impl Scanner for SpaceLens {
     fn name(&self) -> &'static str {
         "Large Folders"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         let existing = prune_roots(roots().into_iter().filter(|r| r.is_dir()).collect());
         let total = existing.len() as u64;
         let mut out = Vec::new();
@@ -90,7 +91,10 @@ impl Scanner for SpaceLens {
             }
         });
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        out
+        ScanOutcome {
+            items: out,
+            incomplete: None,
+        }
     }
 }
 

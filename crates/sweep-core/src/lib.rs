@@ -12,6 +12,7 @@ pub struct JunkItem {
     pub size: u64,
     pub category: String,
     pub selected: bool,
+    pub selectable: bool,
 }
 
 impl JunkItem {
@@ -21,6 +22,7 @@ impl JunkItem {
             size,
             category: category.into(),
             selected: true,
+            selectable: true,
         }
     }
 }
@@ -34,11 +36,18 @@ pub struct Progress {
     pub label: String,
 }
 
+/// Result of a scan pass.
+#[derive(Debug, Default)]
+pub struct ScanOutcome {
+    pub items: Vec<JunkItem>,
+    pub incomplete: Option<String>,
+}
+
 /// A scanner: enumerate candidates, never delete.
 pub trait Scanner: Send {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem>;
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome;
     fn is_available(&self) -> bool {
         true
     }
@@ -50,6 +59,7 @@ pub struct CleanResult {
     pub removed: u64,
     pub bytes_freed: u64,
     pub errors: Vec<String>,
+    pub failed: Vec<PathBuf>,
 }
 
 /// Home dir, None if HOME missing/invalid.
@@ -121,7 +131,10 @@ pub fn trash_paths(paths: &[PathBuf]) -> CleanResult {
             for p in paths {
                 match trash::delete(p) {
                     Ok(()) => out.removed += 1,
-                    Err(e) => out.errors.push(format!("{}: {e}", p.display())),
+                    Err(e) => {
+                        out.errors.push(format!("{}: {e}", p.display()));
+                        out.failed.push(p.clone());
+                    }
                 }
             }
         }

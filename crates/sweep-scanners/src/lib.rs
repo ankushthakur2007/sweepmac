@@ -1,7 +1,7 @@
 //! P0 scanners: system junk + trash. Knowledge-base paths cribbed from
 //! CleanMyMac's SystemJunkScanning/TrashJunkScanning (see REPLICA_PLAN.md).
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, JunkItem, Progress, Scanner};
+use sweep_core::{dir_size, home, JunkItem, Progress, ScanOutcome, Scanner};
 
 pub mod clamsetup;
 pub mod clutter;
@@ -76,7 +76,7 @@ impl Scanner for SystemJunk {
     fn name(&self) -> &'static str {
         "System Junk"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         let Some(h) = home() else {
             on_progress(Progress {
                 done: 0,
@@ -84,7 +84,10 @@ impl Scanner for SystemJunk {
                 bytes: 0,
                 label: "done".into(),
             });
-            return Vec::new();
+            return ScanOutcome {
+                items: Vec::new(),
+                incomplete: None,
+            };
         };
         let mut roots: Vec<(String, PathBuf, bool)> = vec![
             ("User caches".into(), h.join("Library/Caches"), true),
@@ -129,67 +132,16 @@ impl Scanner for SystemJunk {
             label: "done".into(),
         });
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        out
-    }
-}
-
-pub struct TrashBin;
-
-impl Scanner for TrashBin {
-    fn id(&self) -> &'static str {
-        "trash"
-    }
-    fn name(&self) -> &'static str {
-        "Trash"
-    }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        let Some(h) = home() else {
-            on_progress(Progress {
-                done: 0,
-                total: 1,
-                bytes: 0,
-                label: "done".into(),
-            });
-            return Vec::new();
-        };
-        let trash = h.join(".Trash");
-        on_progress(Progress {
-            done: 0,
-            total: 1,
-            bytes: 0,
-            label: "Trash".into(),
-        });
-        let mut out = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&trash) {
-            for entry in rd.filter_map(|e| e.ok()) {
-                let p = entry.path();
-                if sweep_core::is_protected(&p) {
-                    continue;
-                }
-                let size = if p.is_dir() {
-                    dir_size(&p, 8)
-                } else {
-                    entry.metadata().map(|m| m.len()).unwrap_or(0)
-                };
-                if size > 0 {
-                    out.push(JunkItem::new(p, size, "Trash"));
-                }
-            }
+        ScanOutcome {
+            items: out,
+            incomplete: None,
         }
-        out.sort_by(|a, b| b.size.cmp(&a.size));
-        on_progress(Progress {
-            done: 1,
-            total: 1,
-            bytes: out.iter().map(|j| j.size).sum(),
-            label: "done".into(),
-        });
-        out
     }
 }
 
 /// All P0 scanners, in run order.
 pub fn all() -> Vec<Box<dyn Scanner>> {
-    vec![Box::new(SystemJunk), Box::new(TrashBin)]
+    vec![Box::new(SystemJunk)]
 }
 
 /// P1: app-leftover scanners.

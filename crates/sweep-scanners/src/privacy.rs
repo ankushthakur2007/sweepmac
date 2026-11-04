@@ -1,6 +1,6 @@
 //! Browser-data scanner: history + cookie files (file-level only, no sqlite reads).
 use std::path::{Path, PathBuf};
-use sweep_core::{home, JunkItem, Progress, Scanner};
+use sweep_core::{home, JunkItem, Progress, ScanOutcome, Scanner};
 
 pub struct Privacy;
 
@@ -117,10 +117,16 @@ impl Scanner for Privacy {
     fn name(&self) -> &'static str {
         "Browser Data"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
         match home() {
-            Some(h) => scan_home(&h, on_progress),
-            None => Vec::new(),
+            Some(h) => ScanOutcome {
+                items: scan_home(&h, on_progress),
+                incomplete: None,
+            },
+            None => ScanOutcome {
+                items: Vec::new(),
+                incomplete: None,
+            },
         }
     }
 }

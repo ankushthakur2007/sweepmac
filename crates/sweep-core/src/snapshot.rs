@@ -3,10 +3,8 @@
 use std::path::{Path, PathBuf};
 
 /// Real snapshots dir.
-pub fn dir() -> PathBuf {
-    crate::home()
-        .unwrap_or_else(|| std::path::PathBuf::from("/"))
-        .join(".sweepmac/snapshots")
+pub fn dir() -> Option<PathBuf> {
+    crate::home().map(|h| h.join(".sweepmac/snapshots"))
 }
 
 fn now_secs() -> u64 {
@@ -92,10 +90,10 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 
 /// Snapshot to the real dir.
 pub fn save(items: &[(PathBuf, u64, String)]) -> Result<PathBuf, String> {
-    if crate::home().is_none() {
-        return Err("HOME is not set".into());
+    match dir() {
+        Some(d) => save_to(&d, items),
+        None => Err("HOME is not set".into()),
     }
-    save_to(&dir(), items)
 }
 
 #[cfg(test)]
