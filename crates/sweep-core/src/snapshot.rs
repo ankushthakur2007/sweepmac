@@ -154,7 +154,9 @@ fn extract_paths(body: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut rest = body;
     loop {
-        let Some(i) = rest.find("\"path\":\"") else { break };
+        let Some(i) = rest.find("\"path\":\"") else {
+            break;
+        };
         let after = &rest[i + "\"path\":\"".len()..];
         let mut val = String::new();
         let mut esc = false;

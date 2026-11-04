@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use eframe::egui;
-use sweep_core::{fmt_bytes, ignore, snapshot, trash_paths, CleanResult, JunkItem, Progress};
+use sweep_core::{
+    fmt_bytes, ignore, snapshot, trash_paths, CleanResult, JunkItem, Progress, ScanStatus,
+};
 
 mod loginitems;
 mod tray;
@@ -27,6 +29,7 @@ enum Route {
     Performance,
     Protection,
     Clutter,
+    Duplicates,
     SpaceLens,
 }
 
@@ -42,6 +45,7 @@ impl Route {
             (Performance, "Performance", "Startup items audit"),
             (Protection, "Protection", "Quarantine + daemon audit"),
             (Clutter, "My Clutter", "Old & large files"),
+            (Duplicates, "Duplicates", "Byte-identical duplicates"),
             (SpaceLens, "Space Lens", "Large folders"),
         ]
     }
@@ -54,6 +58,7 @@ impl Route {
             Route::Performance => sweep_scanners::performance(),
             Route::Protection => sweep_scanners::protection(),
             Route::Clutter => sweep_scanners::clutter(),
+            Route::Duplicates => sweep_scanners::duplicates(),
             Route::SpaceLens => sweep_scanners::spacelens(),
         }
     }
@@ -61,7 +66,7 @@ impl Route {
 
 enum WorkerMsg {
     Progress(Progress),
-    Done(Vec<JunkItem>),
+    Done(Vec<JunkItem>, ScanStatus),
     Incomplete(Vec<JunkItem>, String),
     Cleaned(sweep_core::CleanResult),
 }
@@ -86,30 +91,40 @@ impl ModulePage {
                 match rx.try_recv() {
                     Ok(msg) => match msg {
                         WorkerMsg::Progress(p) => self.progress = p,
-                        WorkerMsg::Done(items) => {
+                        WorkerMsg::Done(items, status) => {
                             let ignored = ignore::load();
                             let items: Vec<JunkItem> = items
                                 .into_iter()
                                 .filter(|i| !ignore::is_ignored(&i.path, &ignored))
                                 .collect();
                             let total: u64 = items.iter().map(|i| i.size).sum();
-                            // malware.rs reports unreadable/clamd-failed files in its
-                            // final progress label — never claim "clean" after one.
-                            let incomplete = self.progress.label.contains("could not be scanned");
-                            self.status = if items.is_empty() {
-                                if incomplete {
-                                    self.progress.label.clone()
-                                } else {
-                                    "Nothing found — this area is clean.".into()
+                            self.status = match status {
+                                ScanStatus::Complete => {
+                                    if items.is_empty() {
+                                        "Scan complete — nothing found.".into()
+                                    } else {
+                                        format!(
+                                            "Found {} items ({})",
+                                            items.len(),
+                                            fmt_bytes(total)
+                                        )
+                                    }
                                 }
-                            } else {
-                                let found =
-                                    format!("Found {} items ({})", items.len(), fmt_bytes(total));
-                                if incomplete {
-                                    format!("{found} · {}", self.progress.label)
-                                } else {
-                                    found
+                                ScanStatus::CompleteWithWarnings => {
+                                    let found = if items.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(
+                                            "Found {} items ({}) · ",
+                                            items.len(),
+                                            fmt_bytes(total)
+                                        )
+                                    };
+                                    format!("{found}Complete with warnings")
                                 }
+                                ScanStatus::LimitedByPermissions => "Limited by permissions".into(),
+                                ScanStatus::Cancelled => "Cancelled".into(),
+                                ScanStatus::Failed => "Failed".into(),
                             };
                             self.items = items;
                             self.busy = false;
@@ -123,8 +138,13 @@ impl ModulePage {
                                 .filter(|i| !ignore::is_ignored(&i.path, &ignored))
                                 .collect();
                             let n = items.len();
-                            self.status = if n == 0 {
-                                reason.clone()
+                            let lower = reason.to_lowercase();
+                            self.status = if lower.contains("cancelled") {
+                                "Cancelled".into()
+                            } else if lower.contains("permission") {
+                                "Limited by permissions".into()
+                            } else if n == 0 {
+                                format!("Failed: {reason}")
                             } else {
                                 format!("{n} found, but scan incomplete: {reason}")
                             };
@@ -214,7 +234,15 @@ impl ModulePage {
         thread::spawn(move || {
             let mut all = Vec::new();
             let mut incomplete_reason: Option<String> = None;
+            let mut permission_errors: u64 = 0;
             for s in &scanners {
+                if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    incomplete_reason = Some(match incomplete_reason {
+                        Some(prev) => format!("{prev}; Cancelled"),
+                        None => "Cancelled".into(),
+                    });
+                    break;
+                }
                 let tag = s.name().to_string();
                 let cancel = cancel.clone();
                 let outcome = s.scan(
@@ -230,20 +258,47 @@ impl ModulePage {
                     all.push(item);
                 }
                 if let Some(r) = outcome.incomplete {
+                    if r.to_lowercase().contains("permission") {
+                        permission_errors += 1;
+                    }
                     incomplete_reason = Some(match incomplete_reason {
                         Some(prev) => format!("{prev}; {r}"),
                         None => r,
                     });
                 }
             }
-            match incomplete_reason {
-                Some(reason) => {
+            let cancelled = cancel.load(std::sync::atomic::Ordering::SeqCst)
+                || incomplete_reason
+                    .as_deref()
+                    .map(|r| r.to_lowercase().contains("cancelled"))
+                    .unwrap_or(false);
+            let status = if cancelled {
+                ScanStatus::Cancelled
+            } else if let Some(reason) = &incomplete_reason {
+                if reason.to_lowercase().contains("permission") {
+                    ScanStatus::LimitedByPermissions
+                } else {
+                    ScanStatus::Failed
+                }
+            } else if permission_errors > 0 {
+                ScanStatus::CompleteWithWarnings
+            } else {
+                ScanStatus::Complete
+            };
+            // If cancelled, send Incomplete with "Cancelled" reason so pump
+            // labels it Cancelled; otherwise preserve existing reason flow.
+            match (cancelled, incomplete_reason) {
+                (true, _) => {
+                    let _ = tx.send(WorkerMsg::Incomplete(all, "Cancelled".into()));
+                }
+                (false, Some(reason)) => {
                     let _ = tx.send(WorkerMsg::Incomplete(all, reason));
                 }
-                None => {
-                    let _ = tx.send(WorkerMsg::Done(all));
+                (false, None) => {
+                    let _ = tx.send(WorkerMsg::Done(all, status));
                 }
             }
+            let _ = status;
         });
     }
 
@@ -441,6 +496,7 @@ impl SweepApp {
             Route::SpaceLens => 4,
             Route::Protection => 5,
             Route::Clutter => 6,
+            Route::Duplicates => 9,
         }
     }
     fn page_mut(&mut self) -> &mut ModulePage {
@@ -570,8 +626,7 @@ impl SweepApp {
                                     "Nothing left to restore from Trash.".into()
                             }
                             Ok(n) => {
-                                self.page_mut().status =
-                                    format!("Restored {n} item(s) from Trash.")
+                                self.page_mut().status = format!("Restored {n} item(s) from Trash.")
                             }
                             Err(e) => self.page_mut().status = format!("Restore failed: {e}"),
                         }
@@ -583,7 +638,9 @@ impl SweepApp {
             }
             let cancel_btn = ui.add_enabled(busy, egui::Button::new("Cancel"));
             if cancel_btn.clicked() {
-                self.page_mut().cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.page_mut()
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
 
@@ -693,8 +750,10 @@ impl SweepApp {
         self.bulk_busy = true;
         // Per-page cancel flags, reset for the bulk run. A shared flag per page
         // lets the user abort an individual in-flight scan from its page.
-        let mut page_cancels: std::collections::BTreeMap<u8, std::sync::Arc<std::sync::atomic::AtomicBool>> =
-            std::collections::BTreeMap::new();
+        let mut page_cancels: std::collections::BTreeMap<
+            u8,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        > = std::collections::BTreeMap::new();
         for (route, _, _) in Route::meta() {
             // Protection stays opt-in: its scan uploads every binary in
             // /Applications to clamd — minutes behind a bare spinner.
@@ -703,7 +762,8 @@ impl SweepApp {
             }
             let key = Self::key(*route);
             let page = self.pages.entry(key).or_default();
-            page.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+            page.cancel
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             page.busy = true;
             page_cancels.insert(key, page.cancel.clone());
         }
@@ -713,10 +773,9 @@ impl SweepApp {
                     continue;
                 }
                 let key = SweepApp::key(*route);
-                let cancel = page_cancels
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+                let cancel = page_cancels.get(&key).cloned().unwrap_or_else(|| {
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+                });
                 let scanners = route.scanners();
                 let mut all = Vec::new();
                 for s in scanners {
@@ -895,7 +954,7 @@ impl SweepApp {
                     page.items = items;
                     page.busy = false;
                     page.status = if n == 0 {
-                        "Nothing found — this area is clean.".into()
+                        "Scan complete — nothing found.".into()
                     } else {
                         format!("Found {n} items ({})", fmt_bytes(total))
                     };
@@ -920,88 +979,100 @@ impl SweepApp {
             ctx.request_repaint();
         }
 
-        egui::SidePanel::left("nav").resizable(false).show(ctx, |ui| {
-            ui.heading("SweepMac");
-            ui.label(egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak());
-            ui.separator();
-            for (route, label, sub) in Route::meta() {
-                if *route == Route::Welcome && self.route != Route::Welcome {
-                    continue;
-                }
-                let resp = ui.selectable_label(self.route == *route, *label);
-                if resp.clicked() {
-                    self.route = *route;
-                    // A fresh route gets a fresh chance: transient render
-                    // failures clear instead of bricking the session.
-                    self.update_failed = false;
-                }
-                ui.label(egui::RichText::new(*sub).small().weak());
-                ui.add_space(2.0);
-            }
-            ui.separator();
-            // Start at login (user LaunchAgent — unsigned-friendly).
-            {
-                let on = cached5("login", || matches!(loginitems::status(), loginitems::LoginState::Enabled));
-                let label = if on { "Start at login: on" } else { "Start at login: off" };
-                if ui.small_button(label).clicked() {
-                    match loginitems::set_enabled(!on) {
-                        Ok(m) => {
-                            invalidate5("login");
-                            self.update_msg = Some(m);
-                        }
-                        Err(e) => self.update_msg = Some(format!("Login item failed: {e}")),
+        egui::SidePanel::left("nav")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("SweepMac");
+                ui.label(egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak());
+                ui.separator();
+                for (route, label, sub) in Route::meta() {
+                    if *route == Route::Welcome && self.route != Route::Welcome {
+                        continue;
                     }
-                }
-            }
-            // Menu-bar icon show/hide (persisted, applied live).
-            {
-                let on = cached5("menu_icon", tray::menu_icon_enabled);
-                let label = if on { "Menu bar icon: on" } else { "Menu bar icon: off" };
-                if ui.small_button(label).clicked() {
-                    tray::set_menu_icon_enabled(!on);
-                    invalidate5("menu_icon");
-                    if on {
-                        tray::unmount();
-                    } else {
-                        let _ = tray::mount();
+                    let resp = ui.selectable_label(self.route == *route, *label);
+                    if resp.clicked() {
+                        self.route = *route;
+                        // A fresh route gets a fresh chance: transient render
+                        // failures clear instead of bricking the session.
+                        self.update_failed = false;
                     }
+                    ui.label(egui::RichText::new(*sub).small().weak());
+                    ui.add_space(2.0);
                 }
-            }
-            // Self-update via GitHub releases (works while FEED is Some).
-            if let Some(feed) = updater::FEED {
-                if ui.small_button("Check for updates").clicked() && !self.update_busy {
-                    self.update_busy = true;
-                    self.update_msg = Some("Checking…".into());
-                    let ctx2 = ctx.clone();
-                    thread::spawn(move || {
-                        let msg = match updater::check(feed) {
-                            Ok(Some(r)) => {
-                                // Standard behavior: hand the user the release page.
-                                let _ = std::process::Command::new("/usr/bin/open")
-                                    .arg(&r.url)
-                                    .spawn();
-                                format!("Update {} available — release page opened.", r.version)
-                            }
-                            Ok(None) => "You're up to date.".into(),
-                            Err(e) => format!("Update check failed: {e}"),
-                        };
-                        UPDATE_RESULT.lock().unwrap().replace(msg);
-                        ctx2.request_repaint();
+                ui.separator();
+                // Start at login (user LaunchAgent — unsigned-friendly).
+                {
+                    let on = cached5("login", || {
+                        matches!(loginitems::status(), loginitems::LoginState::Enabled)
                     });
-                }
-                if self.update_busy {
-                    if let Some(m) = UPDATE_RESULT.lock().unwrap().take() {
-                        self.update_msg = Some(m.clone());
-                        self.update_busy = false;
+                    let label = if on {
+                        "Start at login: on"
                     } else {
-                        ctx.request_repaint();
+                        "Start at login: off"
+                    };
+                    if ui.small_button(label).clicked() {
+                        match loginitems::set_enabled(!on) {
+                            Ok(m) => {
+                                invalidate5("login");
+                                self.update_msg = Some(m);
+                            }
+                            Err(e) => self.update_msg = Some(format!("Login item failed: {e}")),
+                        }
                     }
                 }
-            }
-            if let Some(m) = &self.update_msg {
-                ui.label(egui::RichText::new(m).small().weak());
-            }
-        });
+                // Menu-bar icon show/hide (persisted, applied live).
+                {
+                    let on = cached5("menu_icon", tray::menu_icon_enabled);
+                    let label = if on {
+                        "Menu bar icon: on"
+                    } else {
+                        "Menu bar icon: off"
+                    };
+                    if ui.small_button(label).clicked() {
+                        tray::set_menu_icon_enabled(!on);
+                        invalidate5("menu_icon");
+                        if on {
+                            tray::unmount();
+                        } else {
+                            let _ = tray::mount();
+                        }
+                    }
+                }
+                // Self-update via GitHub releases (works while FEED is Some).
+                if let Some(feed) = updater::FEED {
+                    if ui.small_button("Check for updates").clicked() && !self.update_busy {
+                        self.update_busy = true;
+                        self.update_msg = Some("Checking…".into());
+                        let ctx2 = ctx.clone();
+                        thread::spawn(move || {
+                            let msg = match updater::check(feed) {
+                                Ok(Some(r)) => {
+                                    // Standard behavior: hand the user the release page.
+                                    let _ = std::process::Command::new("/usr/bin/open")
+                                        .arg(&r.url)
+                                        .spawn();
+                                    format!("Update {} available — release page opened.", r.version)
+                                }
+                                Ok(None) => "You're up to date.".into(),
+                                Err(e) => format!("Update check failed: {e}"),
+                            };
+                            UPDATE_RESULT.lock().unwrap().replace(msg);
+                            ctx2.request_repaint();
+                        });
+                    }
+                    if self.update_busy {
+                        if let Some(m) = UPDATE_RESULT.lock().unwrap().take() {
+                            self.update_msg = Some(m.clone());
+                            self.update_busy = false;
+                        } else {
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+                if let Some(m) = &self.update_msg {
+                    ui.label(egui::RichText::new(m).small().weak());
+                }
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.route {
             Route::Welcome => self.render_welcome(ui),
@@ -1012,6 +1083,7 @@ impl SweepApp {
             Route::Performance => self.render_page(ui, "Performance", "Startup and login items. Disable moves the entry aside (reversible in ~/.sweepmac/disabled) — loginwindow entries must go via System Settings."),
             Route::Protection => self.render_page(ui, "Protection", "Quarantined downloads, non-Apple daemons, and ClamAV malware scan (needs clamd running — brew install clamav). Infected files are never preselected."),
             Route::Clutter => self.render_page(ui, "My Clutter", "Old installers and stale downloads are preselected; large files are listed for your call."),
+            Route::Duplicates => self.render_page(ui, "Duplicates", "Byte-identical duplicates — nothing preselected."),
             Route::SpaceLens => self.render_page(ui, "Space Lens", "Biggest folders per location. Informational — nothing is selected by default."),
         });
     }
@@ -1105,15 +1177,16 @@ mod tests {
             busy: true,
             ..Default::default()
         };
-        tx.send(WorkerMsg::Done(vec![])).unwrap();
+        tx.send(WorkerMsg::Done(vec![], ScanStatus::Complete))
+            .unwrap();
         page.pump();
         assert!(!page.busy, "done cleared busy");
-        assert_eq!(page.status, "Nothing found — this area is clean.");
+        assert_eq!(page.status, "Scan complete — nothing found.");
         // Sender drops -> Disconnected must be ignored (already terminal).
         drop(tx);
         page.pump();
         assert!(!page.busy);
-        assert_eq!(page.status, "Nothing found — this area is clean.");
+        assert_eq!(page.status, "Scan complete — nothing found.");
     }
 
     // Partial cleanup retains only failed items. (Audit #4 #7)

@@ -124,7 +124,8 @@ impl Parser {
                         }
                         let hex: String = self.chars[self.i..self.i + 4].iter().collect();
                         self.i += 4;
-                        let cp = u32::from_str_radix(&hex, 16).map_err(|_| "bad hex".to_string())?;
+                        let cp =
+                            u32::from_str_radix(&hex, 16).map_err(|_| "bad hex".to_string())?;
                         if let Some(ch) = char::from_u32(cp) {
                             out.push(ch);
                         }
@@ -238,7 +239,10 @@ impl Parser {
 }
 
 fn parse_json(s: &str) -> Result<Jv, String> {
-    let mut p = Parser { chars: s.chars().collect(), i: 0 };
+    let mut p = Parser {
+        chars: s.chars().collect(),
+        i: 0,
+    };
     p.parse()
 }
 
@@ -247,19 +251,33 @@ fn obj_get<'a>(obj: &'a [(String, Jv)], key: &str) -> Option<&'a Jv> {
 }
 
 fn as_str(v: &Jv) -> Option<String> {
-    if let Jv::Str(s) = v { Some(s.clone()) } else { None }
+    if let Jv::Str(s) = v {
+        Some(s.clone())
+    } else {
+        None
+    }
 }
 
 fn as_bool(v: &Jv) -> Option<bool> {
-    if let Jv::Bool(b) = v { Some(*b) } else { None }
+    if let Jv::Bool(b) = v {
+        Some(*b)
+    } else {
+        None
+    }
 }
 
 fn as_arr(v: &Jv) -> Option<&Vec<Jv>> {
-    if let Jv::Arr(a) = v { Some(a) } else { None }
+    if let Jv::Arr(a) = v {
+        Some(a)
+    } else {
+        None
+    }
 }
 
 fn as_str_vec(v: &Jv) -> Vec<String> {
-    as_arr(v).map(|a| a.iter().filter_map(as_str).collect()).unwrap_or_default()
+    as_arr(v)
+        .map(|a| a.iter().filter_map(as_str).collect())
+        .unwrap_or_default()
 }
 
 impl Rules {
@@ -306,7 +324,13 @@ impl Rules {
                 }
             }
         }
-        Ok(Self { version, rules, protected_prefixes, never_preselect_contains, home: None })
+        Ok(Self {
+            version,
+            rules,
+            protected_prefixes,
+            never_preselect_contains,
+            home: None,
+        })
     }
 
     pub fn load() -> Self {
@@ -317,8 +341,7 @@ impl Rules {
                 }
             }
         }
-        Self::from_str(include_str!("../../../rules/safety-rules.json"))
-            .unwrap_or_default()
+        Self::from_str(include_str!("../../../rules/safety-rules.json")).unwrap_or_default()
     }
 
     pub fn load_from(path: &Path) -> Self {
@@ -340,7 +363,11 @@ impl Rules {
     }
 
     fn expand(&self, raw: &str, home: &Option<PathBuf>) -> String {
-        let h = home.as_ref().or(self.home.as_ref()).cloned().or_else(crate::home);
+        let h = home
+            .as_ref()
+            .or(self.home.as_ref())
+            .cloned()
+            .or_else(crate::home);
         if let Some(h) = h {
             if raw == "~" {
                 return h.to_string_lossy().into_owned();
@@ -354,12 +381,24 @@ impl Rules {
 
     fn norm_path(p: &Path) -> String {
         let s = p.to_string_lossy().into_owned();
-        if s.len() > 1 { s.trim_end_matches('/').to_string() } else { s }
+        if s.len() > 1 {
+            s.trim_end_matches('/').to_string()
+        } else {
+            s
+        }
     }
 
     fn is_under(path: &str, base: &str) -> bool {
-        let p = if path.len() > 1 { path.trim_end_matches('/') } else { path };
-        let b = if base.len() > 1 { base.trim_end_matches('/') } else { base };
+        let p = if path.len() > 1 {
+            path.trim_end_matches('/')
+        } else {
+            path
+        };
+        let b = if base.len() > 1 {
+            base.trim_end_matches('/')
+        } else {
+            base
+        };
         p == b || p.starts_with(&format!("{}/", b))
     }
 
@@ -434,7 +473,9 @@ impl Rules {
 
     #[allow(dead_code)]
     pub fn never_preselect(&self, id_or_bundle: &str) -> bool {
-        self.never_preselect_contains.iter().any(|s| id_or_bundle.contains(s))
+        self.never_preselect_contains
+            .iter()
+            .any(|s| id_or_bundle.contains(s))
     }
 }
 

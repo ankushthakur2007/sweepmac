@@ -10,6 +10,7 @@ Free, open-source Mac cleaner in Rust. No telemetry, no account, no animations t
 - **Performance** — startup/login items audit with reversible disable
 - **Protection** — quarantine audit, daemon audit, ClamAV malware scan (opt-in)
 - **My Clutter** — old installers, stale downloads, large files
+- **Duplicates** — byte-identical duplicate files (nothing preselected)
 - **Space Lens** — biggest folders per location
 - **Menu bar** — live health tiles (disk, memory, battery, load, net), in-process
 - **Smart Care** — dashboard over all engines

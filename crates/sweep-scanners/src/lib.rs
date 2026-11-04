@@ -5,6 +5,7 @@ use sweep_core::{dir_allocated_size, dir_size, home, JunkItem, Progress, ScanOut
 
 pub mod clamsetup;
 pub mod clutter;
+pub mod duplicates;
 pub mod malware;
 pub mod performance;
 pub mod privacy;
@@ -106,11 +107,26 @@ fn system_junk_roots(h: &Path) -> Vec<(String, PathBuf, bool, bool)> {
             false,
             true,
         ),
-        ("Homebrew cache".into(), h.join(".cache/Homebrew"), false, true),
+        (
+            "Homebrew cache".into(),
+            h.join(".cache/Homebrew"),
+            false,
+            true,
+        ),
         ("npm cache".into(), h.join(".npm/_cacache"), false, true),
         ("pnpm store".into(), h.join(".pnpm-store"), false, true),
-        ("pnpm store".into(), h.join("Library/pnpm/store"), false, true),
-        ("Yarn cache".into(), h.join("Library/Caches/Yarn"), false, true),
+        (
+            "pnpm store".into(),
+            h.join("Library/pnpm/store"),
+            false,
+            true,
+        ),
+        (
+            "Yarn cache".into(),
+            h.join("Library/Caches/Yarn"),
+            false,
+            true,
+        ),
         ("Yarn cache".into(), h.join(".yarn/cache"), false, true),
         (
             "Cargo registry cache".into(),
@@ -124,7 +140,12 @@ fn system_junk_roots(h: &Path) -> Vec<(String, PathBuf, bool, bool)> {
             false,
             true,
         ),
-        ("pip cache".into(), h.join("Library/Caches/pip"), false, true),
+        (
+            "pip cache".into(),
+            h.join("Library/Caches/pip"),
+            false,
+            true,
+        ),
         ("pip cache".into(), h.join(".cache/pip"), false, true),
         ("Gradle cache".into(), h.join(".gradle/caches"), false, true),
         // review-level AI model caches
@@ -266,6 +287,11 @@ pub fn protection() -> Vec<Box<dyn Scanner>> {
 /// P3: old-and-large-file scanners.
 pub fn clutter() -> Vec<Box<dyn Scanner>> {
     vec![Box::new(clutter::Clutter)]
+}
+
+/// P3: exact-duplicate finder.
+pub fn duplicates() -> Vec<Box<dyn Scanner>> {
+    vec![Box::new(duplicates::Duplicates)]
 }
 
 #[cfg(test)]

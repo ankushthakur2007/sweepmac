@@ -37,6 +37,28 @@ pub struct Progress {
     pub label: String,
 }
 
+/// Structured status reported when a scan finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStatus {
+    Complete,
+    CompleteWithWarnings,
+    LimitedByPermissions,
+    Cancelled,
+    Failed,
+}
+
+impl std::fmt::Display for ScanStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScanStatus::Complete => write!(f, "Scan complete"),
+            ScanStatus::CompleteWithWarnings => write!(f, "Complete with warnings"),
+            ScanStatus::LimitedByPermissions => write!(f, "Limited by permissions"),
+            ScanStatus::Cancelled => write!(f, "Cancelled"),
+            ScanStatus::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 /// Result of a scan pass.
 #[derive(Debug, Default)]
 pub struct ScanOutcome {

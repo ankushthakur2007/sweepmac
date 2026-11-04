@@ -12,7 +12,11 @@ fn push_file(out: &mut Vec<JunkItem>, path: PathBuf, category: &str) {
     }
 }
 
-fn scan_home(home: &Path, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> Vec<JunkItem> {
+fn scan_home(
+    home: &Path,
+    on_progress: &dyn Fn(Progress),
+    is_cancelled: &dyn Fn() -> bool,
+) -> Vec<JunkItem> {
     // (label, profile dir relative to ~, [(file, category suffix)])
     let chromium: &[(&str, &str)] = &[
         (
