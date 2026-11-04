@@ -1,7 +1,7 @@
 //! P0 scanners: system junk + trash. Knowledge-base paths cribbed from
 //! CleanMyMac's SystemJunkScanning/TrashJunkScanning (see REPLICA_PLAN.md).
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, JunkItem, Progress, ScanOutcome, Scanner};
+use sweep_core::{dir_allocated_size, dir_size, home, JunkItem, Progress, ScanOutcome, Scanner};
 
 pub mod clamsetup;
 pub mod clutter;
@@ -28,7 +28,7 @@ fn items_for_root(name: &str, path: &Path) -> Vec<JunkItem> {
         if !p.is_dir() {
             continue;
         }
-        let size = dir_size(&p, 6);
+        let size = dir_allocated_size(&p, 6);
         if size > 0 {
             let child = p
                 .file_name()
@@ -67,6 +67,91 @@ fn app_junk_roots(h: &Path) -> Vec<(&'static str, PathBuf)> {
     subs.into_iter().map(|(n, s)| (n, h.join(s))).collect()
 }
 
+/// Declarative list of system junk roots: (label, path, expand_per_subdir, selected).
+fn system_junk_roots(h: &Path) -> Vec<(String, PathBuf, bool, bool)> {
+    let mut roots: Vec<(String, PathBuf, bool, bool)> = vec![
+        ("User caches".into(), h.join("Library/Caches"), true, true),
+        ("User logs".into(), h.join("Library/Logs"), true, true),
+        (
+            "Xcode derived data".into(),
+            h.join("Library/Developer/Xcode/DerivedData"),
+            false,
+            true,
+        ),
+        // review-level Xcode artifacts
+        (
+            "Xcode archives".into(),
+            h.join("Library/Developer/Xcode/Archives"),
+            false,
+            false,
+        ),
+        (
+            "Xcode device support".into(),
+            h.join("Library/Developer/Xcode/iOS DeviceSupport"),
+            false,
+            false,
+        ),
+        (
+            "CoreSimulator devices".into(),
+            h.join("Library/Developer/CoreSimulator/Devices"),
+            false,
+            false,
+        ),
+    ];
+    roots.extend([
+        // developer tool caches (safe)
+        (
+            "Homebrew cache".into(),
+            h.join("Library/Caches/Homebrew"),
+            false,
+            true,
+        ),
+        ("Homebrew cache".into(), h.join(".cache/Homebrew"), false, true),
+        ("npm cache".into(), h.join(".npm/_cacache"), false, true),
+        ("pnpm store".into(), h.join(".pnpm-store"), false, true),
+        ("pnpm store".into(), h.join("Library/pnpm/store"), false, true),
+        ("Yarn cache".into(), h.join("Library/Caches/Yarn"), false, true),
+        ("Yarn cache".into(), h.join(".yarn/cache"), false, true),
+        (
+            "Cargo registry cache".into(),
+            h.join(".cargo/registry/cache"),
+            false,
+            true,
+        ),
+        (
+            "Cargo registry src".into(),
+            h.join(".cargo/registry/src"),
+            false,
+            true,
+        ),
+        ("pip cache".into(), h.join("Library/Caches/pip"), false, true),
+        ("pip cache".into(), h.join(".cache/pip"), false, true),
+        ("Gradle cache".into(), h.join(".gradle/caches"), false, true),
+        // review-level AI model caches
+        (
+            "Hugging Face cache".into(),
+            h.join(".cache/huggingface"),
+            false,
+            false,
+        ),
+        ("Ollama models".into(), h.join(".ollama"), false, false),
+        // review-level Mail downloads
+        (
+            "Mail downloads".into(),
+            h.join("Library/Containers/com.apple.mail/Data/Library/Mail Downloads"),
+            false,
+            false,
+        ),
+    ]);
+    // shortcut: docker build cache needs docker CLI + permissions; enumerated would also
+    // touch VM disks. Skipped per plan — leave a comment only.
+    // docker: ~/Library/Containers/com.docker.docker/Data/vms (not scanned here).
+    for (n, p) in app_junk_roots(h) {
+        roots.push((n.to_string(), p, false, true));
+    }
+    roots
+}
+
 pub struct SystemJunk;
 
 impl Scanner for SystemJunk {
@@ -76,7 +161,7 @@ impl Scanner for SystemJunk {
     fn name(&self) -> &'static str {
         "System Junk"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
         let Some(h) = home() else {
             on_progress(Progress {
                 done: 0,
@@ -89,21 +174,17 @@ impl Scanner for SystemJunk {
                 incomplete: None,
             };
         };
-        let mut roots: Vec<(String, PathBuf, bool)> = vec![
-            ("User caches".into(), h.join("Library/Caches"), true),
-            ("User logs".into(), h.join("Library/Logs"), true),
-            (
-                "Xcode derived data".into(),
-                h.join("Library/Developer/Xcode/DerivedData"),
-                true,
-            ),
-        ];
-        for (n, p) in app_junk_roots(&h) {
-            roots.push((n.to_string(), p, false));
-        }
+        let roots = system_junk_roots(&h);
         let total = roots.len() as u64;
         let mut out = Vec::new();
-        for (i, (name, path, expand)) in roots.iter().enumerate() {
+        for (i, (name, path, expand, selected)) in roots.iter().enumerate() {
+            if is_cancelled() {
+                out.sort_by(|a: &JunkItem, b| b.size.cmp(&a.size));
+                return ScanOutcome {
+                    items: out,
+                    incomplete: Some("Cancelled".into()),
+                };
+            }
             on_progress(Progress {
                 done: i as u64,
                 total,
@@ -121,9 +202,20 @@ impl Scanner for SystemJunk {
             } else {
                 let size = dir_size(path, 6);
                 if size > 0 {
-                    out.push(JunkItem::new(path.clone(), size, name));
+                    if *selected {
+                        out.push(JunkItem::new(path.clone(), size, name));
+                    } else {
+                        out.push(sweep_core::unselected(path.clone(), size, name));
+                    }
                 }
             }
+        }
+        out.sort_by(|a: &JunkItem, b| b.size.cmp(&a.size));
+        if is_cancelled() {
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
         }
         on_progress(Progress {
             done: total,
@@ -131,7 +223,6 @@ impl Scanner for SystemJunk {
             bytes: out.iter().map(|j| j.size).sum(),
             label: "done".into(),
         });
-        out.sort_by(|a, b| b.size.cmp(&a.size));
         ScanOutcome {
             items: out,
             incomplete: None,
@@ -199,15 +290,21 @@ mod tests {
         fs::create_dir_all(root.join("com.apple.Safari")).unwrap();
         fs::create_dir_all(root.join("com.example.small")).unwrap();
         fs::create_dir_all(root.join("empty")).unwrap();
-        fs::write(root.join("com.apple.Safari/f"), vec![0u8; 300]).unwrap();
+        fs::write(root.join("com.apple.Safari/f"), vec![0u8; 9000]).unwrap();
         fs::write(root.join("com.example.small/f"), vec![0u8; 100]).unwrap();
 
         let items = items_for_root("User caches", &root);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].category, "User caches · com.apple.Safari");
-        assert_eq!(items[0].size, 300);
+        assert_eq!(
+            items[0].size,
+            sweep_core::dir_allocated_size(&root.join("com.apple.Safari"), 6)
+        );
         assert_eq!(items[1].category, "User caches · com.example.small");
-        assert_eq!(items[1].size, 100);
+        assert_eq!(
+            items[1].size,
+            sweep_core::dir_allocated_size(&root.join("com.example.small"), 6)
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -217,5 +314,14 @@ mod tests {
         assert!(items_for_root("User caches", &root).is_empty());
         assert!(items_for_root("User caches", &root.join("nope")).is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn system_junk_roots_includes_npm_cache() {
+        let h = PathBuf::from("/tmp/home");
+        let roots = system_junk_roots(&h);
+        assert!(roots
+            .iter()
+            .any(|(name, path, _, _)| name == "npm cache" && path == &h.join(".npm/_cacache")));
     }
 }

@@ -317,7 +317,7 @@ pub fn mount() -> bool {
                 let _ = tx_label.send("Scanning…".into());
                 let mut all = Vec::new();
                 for s in sweep_scanners::all() {
-                    all.extend(s.scan(&|_| {}).items);
+                    all.extend(s.scan(&|_| {}, &|| false).items);
                 }
                 let bytes: u64 = all.iter().map(|j| j.size).sum();
                 let _ = tx_label.send(format!("Reclaimable: {}", fmt_bytes(bytes)));

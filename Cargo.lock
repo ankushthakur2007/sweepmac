@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "sweepmac"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cocoa",
  "eframe",

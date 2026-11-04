@@ -12,7 +12,7 @@ fn push_file(out: &mut Vec<JunkItem>, path: PathBuf, category: &str) {
     }
 }
 
-fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
+fn scan_home(home: &Path, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> Vec<JunkItem> {
     // (label, profile dir relative to ~, [(file, category suffix)])
     let chromium: &[(&str, &str)] = &[
         (
@@ -31,6 +31,9 @@ fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
     let mut step = 0u64;
 
     for (browser, rel) in chromium {
+        if is_cancelled() {
+            return out;
+        }
         on_progress(Progress {
             done: step,
             total,
@@ -66,9 +69,15 @@ fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
         label: "Firefox".into(),
     });
     step += 1;
+    if is_cancelled() {
+        return out;
+    }
     let profiles = home.join("Library/Application Support/Firefox/Profiles");
     if let Ok(rd) = std::fs::read_dir(&profiles) {
         for entry in rd.filter_map(|e| e.ok()) {
+            if is_cancelled() {
+                return out;
+            }
             let p = entry.path();
             if !p.is_dir() {
                 continue;
@@ -117,12 +126,17 @@ impl Scanner for Privacy {
     fn name(&self) -> &'static str {
         "Browser Data"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
         match home() {
-            Some(h) => ScanOutcome {
-                items: scan_home(&h, on_progress),
-                incomplete: None,
-            },
+            Some(h) => {
+                let items = scan_home(&h, on_progress, is_cancelled);
+                let incomplete = if is_cancelled() {
+                    Some("Cancelled".into())
+                } else {
+                    None
+                };
+                ScanOutcome { items, incomplete }
+            }
             None => ScanOutcome {
                 items: Vec::new(),
                 incomplete: None,
@@ -152,7 +166,7 @@ mod tests {
         std::fs::create_dir_all(&safari).unwrap();
         std::fs::write(safari.join("History.db"), vec![0u8; 50]).unwrap();
 
-        let items = scan_home(&root, &|_| {});
+        let items = scan_home(&root, &|_| {}, &|| false);
         assert!(items
             .iter()
             .any(|j| j.category == "Chrome history" && j.size == 10));

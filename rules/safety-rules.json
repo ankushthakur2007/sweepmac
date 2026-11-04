@@ -1,0 +1,151 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "chrome-cache",
+      "bundle_id": "com.google.Chrome",
+      "paths": ["~/Library/Caches/com.google.Chrome", "~/Library/Application Support/Google/Chrome/Default/Cache", "~/Library/Application Support/Google/Chrome/Default/Code Cache"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Browser cache, regenerates automatically"
+    },
+    {
+      "id": "safari-cache",
+      "bundle_id": "com.apple.Safari",
+      "paths": ["~/Library/Caches/com.apple.Safari", "~/Library/Containers/com.apple.Safari/Data/Library/Caches"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Browser cache, regenerates automatically"
+    },
+    {
+      "id": "firefox-cache",
+      "bundle_id": "org.mozilla.firefox",
+      "paths": ["~/Library/Caches/Firefox", "~/Library/Application Support/Firefox/Profiles"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Browser cache, regenerates automatically"
+    },
+    {
+      "id": "edge-cache",
+      "bundle_id": "com.microsoft.edgemac",
+      "paths": ["~/Library/Caches/com.microsoft.Edge", "~/Library/Application Support/Microsoft Edge/Default/Cache"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Browser cache, regenerates automatically"
+    },
+    {
+      "id": "xcode-deriveddata",
+      "bundle_id": "com.apple.dt.Xcode",
+      "paths": ["~/Library/Developer/Xcode/DerivedData"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Build artifacts, regenerated on next build"
+    },
+    {
+      "id": "homebrew-cache",
+      "bundle_id": null,
+      "paths": ["~/Library/Caches/Homebrew"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Downloaded package cache, re-downloads as needed"
+    },
+    {
+      "id": "npm-cache",
+      "bundle_id": null,
+      "paths": ["~/.npm", "~/Library/Caches/npm"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Package manager cache"
+    },
+    {
+      "id": "yarn-cache",
+      "bundle_id": null,
+      "paths": ["~/.yarn/cache", "~/Library/Caches/Yarn"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Package manager cache"
+    },
+    {
+      "id": "pnpm-cache",
+      "bundle_id": null,
+      "paths": ["~/Library/pnpm/store", "~/.pnpm-store"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Package manager cache"
+    },
+    {
+      "id": "cargo-cache",
+      "bundle_id": null,
+      "paths": ["~/.cargo/registry/cache", "~/.cargo/registry/src"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Rust crate cache, re-downloads as needed"
+    },
+    {
+      "id": "pip-cache",
+      "bundle_id": null,
+      "paths": ["~/Library/Caches/pip"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Python package cache"
+    },
+    {
+      "id": "gradle-cache",
+      "bundle_id": null,
+      "paths": ["~/.gradle/caches"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Gradle build cache"
+    },
+    {
+      "id": "docker-cache",
+      "bundle_id": "com.docker.docker",
+      "paths": ["~/Library/Containers/com.docker.docker/Data/vms"],
+      "confidence": "review",
+      "preselected": false,
+      "reason": "Docker VM disk images; review before deleting"
+    },
+    {
+      "id": "mail-attachments",
+      "bundle_id": "com.apple.mail",
+      "paths": ["~/Library/Mail Downloads", "~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"],
+      "confidence": "review",
+      "preselected": false,
+      "reason": "Mail attachments; review before deleting"
+    },
+    {
+      "id": "generic-user-caches",
+      "bundle_id": null,
+      "paths": ["~/Library/Caches"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Generic user cache directory"
+    },
+    {
+      "id": "user-logs",
+      "bundle_id": null,
+      "paths": ["~/Library/Logs"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Log files"
+    },
+    {
+      "id": "trash",
+      "bundle_id": null,
+      "paths": ["~/.Trash"],
+      "confidence": "safe",
+      "preselected": true,
+      "reason": "Trash contents"
+    },
+    {
+      "id": "system-caches",
+      "bundle_id": null,
+      "paths": ["/Library/Caches"],
+      "confidence": "review",
+      "preselected": false,
+      "reason": "System-wide caches; review before deleting"
+    }
+  ],
+  "protected_prefixes": ["/System", "/private", "/bin", "/usr", "/sbin", "/var/db", "/dev", "/Volumes"],
+  "never_preselect_contains": ["com.apple."]
+}

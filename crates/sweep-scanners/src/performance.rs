@@ -230,7 +230,13 @@ impl Scanner for Performance {
     fn name(&self) -> &'static str {
         "Startup Items"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
+        if is_cancelled() {
+            return ScanOutcome {
+                items: Vec::new(),
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 0,
             total: 1,
@@ -261,6 +267,12 @@ impl Scanner for Performance {
             &h.join("Library/Preferences/com.apple.loginwindow.plist"),
         ));
         out.sort_by(|a, b| b.size.cmp(&a.size));
+        if is_cancelled() {
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 1,
             total: 1,
@@ -372,7 +384,7 @@ mod tests {
     #[test]
     fn full_scan_never_panics() {
         // No HOME stubbing: passes on any machine, real entries or not.
-        let items = Performance.scan(&|_| {}).items;
+        let items = Performance.scan(&|_| {}, &|| false).items;
         assert!(items
             .iter()
             .all(|i| i.category == "Login item" && !i.selected));

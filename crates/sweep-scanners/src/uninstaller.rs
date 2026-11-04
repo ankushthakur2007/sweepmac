@@ -136,7 +136,13 @@ impl Scanner for Uninstaller {
     fn name(&self) -> &'static str {
         "App Leftovers"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
+        if is_cancelled() {
+            return ScanOutcome {
+                items: Vec::new(),
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 0,
             total: 2,
@@ -174,10 +180,30 @@ impl Scanner for Uninstaller {
             "Library/Cookies",
             "Library/Logs",
         ] {
+            if is_cancelled() {
+                out.sort_by(|a, b| b.size.cmp(&a.size));
+                on_progress(Progress {
+                    done: 2,
+                    total: 2,
+                    bytes: out.iter().map(|j| j.size).sum(),
+                    label: "Cancelled".into(),
+                });
+                return ScanOutcome {
+                    items: out,
+                    incomplete: Some("Cancelled".into()),
+                };
+            }
             let Ok(rd) = std::fs::read_dir(h.join(parent)) else {
                 continue;
             };
             for entry in rd.filter_map(|e| e.ok()) {
+                if is_cancelled() {
+                    out.sort_by(|a, b| b.size.cmp(&a.size));
+                    return ScanOutcome {
+                        items: out,
+                        incomplete: Some("Cancelled".into()),
+                    };
+                }
                 let p = entry.path();
                 if sweep_core::is_protected(&p) {
                     continue;
@@ -210,15 +236,24 @@ impl Scanner for Uninstaller {
             }
         }
         out.sort_by(|a, b| b.size.cmp(&a.size));
+        let incomplete = if is_cancelled() {
+            Some("Cancelled".into())
+        } else {
+            None
+        };
         on_progress(Progress {
             done: 2,
             total: 2,
             bytes: out.iter().map(|j| j.size).sum(),
-            label: "done".into(),
+            label: if is_cancelled() {
+                "Cancelled".into()
+            } else {
+                "done".into()
+            },
         });
         ScanOutcome {
             items: out,
-            incomplete: None,
+            incomplete,
         }
     }
 }

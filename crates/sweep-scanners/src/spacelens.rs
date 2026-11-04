@@ -1,7 +1,7 @@
 //! SpaceLens scanner: top-level folder sizes under fixed roots.
 //! Informational only — items default to unselected, the user opts in.
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, JunkItem, Progress, ScanOutcome, Scanner};
+use sweep_core::{dir_allocated_size, home, JunkItem, Progress, ScanOutcome, Scanner};
 
 fn roots() -> Vec<PathBuf> {
     let Some(h) = home() else {
@@ -50,7 +50,7 @@ fn children_sizes(root: &Path) -> Vec<JunkItem> {
         .filter(|p| p.is_dir() && !p.is_symlink())
         .filter(|p| !sweep_core::is_protected(p))
         .filter_map(|p| {
-            let size = dir_size(&p, 6);
+            let size = dir_allocated_size(&p, 6);
             (size > 0).then(|| JunkItem {
                 path: p,
                 size,
@@ -71,7 +71,7 @@ impl Scanner for SpaceLens {
     fn name(&self) -> &'static str {
         "Large Folders"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
         let existing = prune_roots(roots().into_iter().filter(|r| r.is_dir()).collect());
         let total = existing.len() as u64;
         let mut out = Vec::new();
@@ -81,7 +81,11 @@ impl Scanner for SpaceLens {
                 .map(|r| s.spawn(|| children_sizes(r)))
                 .collect();
             for (i, (root, h)) in existing.iter().zip(handles).enumerate() {
-                out.extend(h.join().unwrap_or_default());
+                let res = h.join().unwrap_or_default();
+                if is_cancelled() {
+                    continue;
+                }
+                out.extend(res);
                 on_progress(Progress {
                     done: i as u64 + 1,
                     total,
@@ -93,7 +97,11 @@ impl Scanner for SpaceLens {
         out.sort_by(|a, b| b.size.cmp(&a.size));
         ScanOutcome {
             items: out,
-            incomplete: None,
+            incomplete: if is_cancelled() {
+                Some("Cancelled".into())
+            } else {
+                None
+            },
         }
     }
 }
@@ -124,11 +132,11 @@ mod tests {
         std::fs::write(kid.join("a.bin"), vec![0u8; 100]).unwrap();
         std::fs::write(kid.join("nested/b.bin"), vec![1u8; 200]).unwrap();
         std::fs::write(root.join("top.bin"), vec![2u8; 50]).unwrap(); // plain file: ignored
-        assert_eq!(dir_size(&kid, 6), 300);
+        let expected = sweep_core::dir_allocated_size(&kid, 6);
         let items = children_sizes(&root);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].path, kid);
-        assert_eq!(items[0].size, 300);
+        assert_eq!(items[0].size, expected);
         assert!(!items[0].selected);
         std::fs::remove_dir_all(&root).ok();
     }

@@ -1,6 +1,7 @@
 //! SweepMac core: scan → clean pipeline (mirrors CleanMyMac's
 //! KnowledgeBase → Tasks → Processor → FileRemover, minus the bloat).
 pub mod ignore;
+pub mod rules;
 pub mod snapshot;
 
 use std::path::PathBuf;
@@ -47,7 +48,7 @@ pub struct ScanOutcome {
 pub trait Scanner: Send {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome;
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome;
 }
 
 /// Result of a clean pass.
@@ -69,7 +70,7 @@ pub fn home() -> Option<PathBuf> {
 
 /// Sum of file sizes under `dir` (bounded depth, symlink-safe, errors ignored).
 /// Sparse files count logical size; callers needing disk usage should use
-/// `st_blocks` instead (see SpaceLens).
+/// `dir_allocated_size` instead.
 pub fn dir_size(dir: &std::path::Path, max_depth: usize) -> u64 {
     walkdir::WalkDir::new(dir)
         .max_depth(max_depth)
@@ -82,9 +83,43 @@ pub fn dir_size(dir: &std::path::Path, max_depth: usize) -> u64 {
         .sum()
 }
 
-/// File size or 0 when unreadable.
+/// Allocated disk bytes for `p` via `st_blocks` (actual blocks), falling back
+/// to logical size on non-macOS or stat failure.
+#[cfg(target_os = "macos")]
+fn allocated_from_meta(m: &std::fs::Metadata) -> u64 {
+    use std::os::darwin::fs::MetadataExt;
+    m.st_blocks().saturating_mul(512)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn allocated_from_meta(m: &std::fs::Metadata) -> u64 {
+    m.len()
+}
+
+/// Actual disk usage (allocated blocks) of `p`, or 0 when unreadable.
+pub fn allocated_size(p: &std::path::Path) -> u64 {
+    std::fs::metadata(p)
+        .map(|m| allocated_from_meta(&m))
+        .unwrap_or(0)
+}
+
+/// File size or 0 when unreadable (logical `st_size`).
 pub fn file_size(p: &std::path::Path) -> u64 {
     std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Sum of allocated disk bytes under `dir` (bounded depth, symlink-safe, errors
+/// ignored).
+pub fn dir_allocated_size(dir: &std::path::Path, max_depth: usize) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .max_depth(max_depth)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| allocated_from_meta(&m))
+        .sum()
 }
 
 /// True when SIP protects `p` (`stat` flag `SF_RESTRICTED`, 0x80000).
@@ -151,5 +186,31 @@ pub fn fmt_bytes(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", U[u])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn allocated_size_at_least_logical_for_temp_file() {
+        let p = std::env::temp_dir().join(format!("sweep-alloc-{}", std::process::id()));
+        fs::write(&p, vec![0u8; 100]).unwrap();
+        let logical = fs::metadata(&p).unwrap().len();
+        let alloc = allocated_size(&p);
+        assert!(alloc >= logical, "alloc={alloc} logical={logical}");
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn dir_allocated_size_sums() {
+        let root = std::env::temp_dir().join(format!("sweep-diralloc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/a.bin"), vec![0u8; 100]).unwrap();
+        assert!(dir_allocated_size(&root, 6) >= 100);
+        let _ = fs::remove_dir_all(&root);
     }
 }

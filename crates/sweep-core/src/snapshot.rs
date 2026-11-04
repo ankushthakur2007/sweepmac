@@ -96,6 +96,97 @@ pub fn save(items: &[(PathBuf, u64, String)]) -> Result<PathBuf, String> {
     }
 }
 
+/// Most recent snapshot file, if any.
+pub fn latest() -> Option<PathBuf> {
+    files_in(&dir()?).first().cloned()
+}
+
+/// Best-effort undo: move every path recorded in the most recent snapshot
+/// back from the Trash to its original location. Returns the number restored.
+pub fn restore_latest() -> Result<usize, String> {
+    let Some(latest) = latest() else {
+        return Ok(0);
+    };
+    let body = std::fs::read_to_string(&latest).map_err(|e| e.to_string())?;
+    let paths = extract_paths(&body);
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    restore_from_trash(&paths)
+}
+
+/// Move the given original paths back out of the Trash, if still present.
+/// On macOS the trash crate does not expose os_limited restore, so this is a
+/// best-effort move from ~/.Trash by original filename.
+pub fn restore_from_trash(paths: &[PathBuf]) -> Result<usize, String> {
+    let trash_dir = crate::home()
+        .map(|h| h.join(".Trash"))
+        .ok_or_else(|| "HOME is not set".to_string())?;
+    let mut restored = 0usize;
+    for original in paths {
+        let name = match original.file_name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let trashed = trash_dir.join(name);
+        if !trashed.exists() {
+            continue;
+        }
+        if let Some(parent) = original.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("restore: cannot create parent {}: {e}", parent.display());
+                continue;
+            }
+        }
+        if original.exists() {
+            // A live file already exists; refuse to overwrite.
+            continue;
+        }
+        if std::fs::rename(&trashed, original).is_ok() {
+            restored += 1;
+        }
+    }
+    Ok(restored)
+}
+
+/// Hand-rolled extractor for {"path":"..."} entries in snapshot JSON.
+fn extract_paths(body: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    loop {
+        let Some(i) = rest.find("\"path\":\"") else { break };
+        let after = &rest[i + "\"path\":\"".len()..];
+        let mut val = String::new();
+        let mut esc = false;
+        let mut end = None;
+        for (idx, c) in after.chars().enumerate() {
+            if esc {
+                match c {
+                    'n' => val.push('\n'),
+                    't' => val.push('\t'),
+                    'r' => val.push('\r'),
+                    other => val.push(other),
+                }
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                end = Some(idx);
+                break;
+            } else {
+                val.push(c);
+            }
+        }
+        if end.is_some() {
+            out.push(PathBuf::from(val));
+        } else {
+            break;
+        }
+        rest = &after[end.unwrap() + 1..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

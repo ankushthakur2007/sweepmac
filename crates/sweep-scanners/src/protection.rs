@@ -142,11 +142,17 @@ impl Scanner for Protection {
     fn name(&self) -> &'static str {
         "Suspicious Files"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
         const TOTAL: u64 = 3;
         let mut out = Vec::new();
         let total_bytes = |out: &[JunkItem]| out.iter().map(|j: &JunkItem| j.size).sum();
 
+        if is_cancelled() {
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 0,
             total: TOTAL,
@@ -154,26 +160,52 @@ impl Scanner for Protection {
             label: "Downloads".into(),
         });
         if let Some(h) = home() {
-            out.extend(items_from_downloads(&h.join("Downloads")));
+            if !is_cancelled() {
+                out.extend(items_from_downloads(&h.join("Downloads")));
+            }
         }
 
+        if is_cancelled() {
+            out.sort_by(|a, b| b.size.cmp(&a.size));
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 1,
             total: TOTAL,
             bytes: total_bytes(&out),
             label: "LaunchDaemons".into(),
         });
-        out.extend(items_from_daemon_dir(Path::new("/Library/LaunchDaemons")));
+        if !is_cancelled() {
+            out.extend(items_from_daemon_dir(Path::new("/Library/LaunchDaemons")));
+        }
 
+        if is_cancelled() {
+            out.sort_by(|a, b| b.size.cmp(&a.size));
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: 2,
             total: TOTAL,
             bytes: total_bytes(&out),
             label: "LaunchAgents".into(),
         });
-        out.extend(items_from_daemon_dir(Path::new("/Library/LaunchAgents")));
+        if !is_cancelled() {
+            out.extend(items_from_daemon_dir(Path::new("/Library/LaunchAgents")));
+        }
 
         out.sort_by(|a, b| b.size.cmp(&a.size));
+        if is_cancelled() {
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: TOTAL,
             total: TOTAL,
@@ -288,7 +320,7 @@ mod tests {
 
     #[test]
     fn full_scan_never_panics() {
-        let items = Protection.scan(&|_| {}).items;
+        let items = Protection.scan(&|_| {}, &|| false).items;
         assert!(items.iter().all(|i| !i.selected));
     }
 }

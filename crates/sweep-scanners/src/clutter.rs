@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use sweep_core::{home, JunkItem, Progress, ScanOutcome, Scanner};
+use sweep_core::{allocated_size, home, JunkItem, Progress, ScanOutcome, Scanner};
 
 const LARGE_BYTES: u64 = 500 * 1024 * 1024;
 const INSTALLER_DAYS: u64 = 30;
@@ -85,12 +85,13 @@ fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
         }
         let Ok(md) = entry.metadata() else { continue };
         let age = md.modified().ok().and_then(age_days);
+        let size = allocated_size(entry.path());
         let Some((category, selected)) = classify(entry.path(), md.len(), age, in_downloads) else {
             continue;
         };
         out.push(JunkItem {
             path: entry.path().to_path_buf(),
-            size: md.len(),
+            size,
             category: category.into(),
             selected,
             selectable: true,
@@ -121,7 +122,7 @@ impl Scanner for Clutter {
     fn name(&self) -> &'static str {
         "Old & Large Files"
     }
-    fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome {
+    fn scan(&self, on_progress: &dyn Fn(Progress), is_cancelled: &dyn Fn() -> bool) -> ScanOutcome {
         let h = home();
         let downloads = h.as_ref().map(|h| h.join("Downloads")).unwrap_or_default();
         let desktop = h.as_ref().map(|h| h.join("Desktop")).unwrap_or_default();
@@ -143,6 +144,13 @@ impl Scanner for Clutter {
         let total = roots.len() as u64;
         let mut out = Vec::new();
         for (i, root) in roots.iter().enumerate() {
+            if is_cancelled() {
+                let out = dedupe_by_path(out);
+                return ScanOutcome {
+                    items: out,
+                    incomplete: Some("Cancelled".into()),
+                };
+            }
             on_progress(Progress {
                 done: i as u64,
                 total,
@@ -154,6 +162,12 @@ impl Scanner for Clutter {
             }
         }
         let out = dedupe_by_path(out);
+        if is_cancelled() {
+            return ScanOutcome {
+                items: out,
+                incomplete: Some("Cancelled".into()),
+            };
+        }
         on_progress(Progress {
             done: total,
             total,
@@ -286,7 +300,11 @@ mod tests {
         let out = dedupe_by_path(items);
         assert_eq!(out.len(), 1, "duplicate rows must collapse: {out:?}");
         assert_eq!(out[0].path, big);
-        assert_eq!(out[0].size, LARGE_BYTES + 1, "total must not be tripled");
+        assert_eq!(
+            out[0].size,
+            sweep_core::allocated_size(&big),
+            "total must not be tripled"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

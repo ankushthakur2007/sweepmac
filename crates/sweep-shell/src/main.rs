@@ -75,6 +75,7 @@ struct ModulePage {
     rx: Option<Receiver<WorkerMsg>>,
     setup_log: Vec<String>,
     setup_rx: Option<Receiver<String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ModulePage {
@@ -208,17 +209,23 @@ impl ModulePage {
         self.busy = true;
         self.items.clear();
         self.status = "Scanning…".into();
+        let cancel = self.cancel.clone();
+        cancel.store(false, std::sync::atomic::Ordering::SeqCst);
         thread::spawn(move || {
             let mut all = Vec::new();
             let mut incomplete_reason: Option<String> = None;
             for s in &scanners {
                 let tag = s.name().to_string();
-                let outcome = s.scan(&|p| {
-                    let _ = tx.send(WorkerMsg::Progress(Progress {
-                        label: format!("{tag}: {}", p.label),
-                        ..p
-                    }));
-                });
+                let cancel = cancel.clone();
+                let outcome = s.scan(
+                    &|p| {
+                        let _ = tx.send(WorkerMsg::Progress(Progress {
+                            label: format!("{tag}: {}", p.label),
+                            ..p
+                        }));
+                    },
+                    &|| cancel.load(std::sync::atomic::Ordering::SeqCst),
+                );
                 for item in outcome.items {
                     all.push(item);
                 }
@@ -554,8 +561,29 @@ impl SweepApp {
                     }
                 }
             }
+            if route == Route::Cleanup {
+                if snapshot::latest().is_some() {
+                    if ui.small_button("Restore last clean").clicked() {
+                        match snapshot::restore_latest() {
+                            Ok(0) => {
+                                self.page_mut().status =
+                                    "Nothing left to restore from Trash.".into()
+                            }
+                            Ok(n) => {
+                                self.page_mut().status =
+                                    format!("Restored {n} item(s) from Trash.")
+                            }
+                            Err(e) => self.page_mut().status = format!("Restore failed: {e}"),
+                        }
+                    }
+                }
+            }
             if busy {
                 ui.spinner();
+            }
+            let cancel_btn = ui.add_enabled(busy, egui::Button::new("Cancel"));
+            if cancel_btn.clicked() {
+                self.page_mut().cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
 
@@ -663,28 +691,41 @@ impl SweepApp {
         let (tx, rx) = mpsc::channel::<(u8, Vec<JunkItem>)>();
         self.bulk_rx = Some(rx);
         self.bulk_busy = true;
+        // Per-page cancel flags, reset for the bulk run. A shared flag per page
+        // lets the user abort an individual in-flight scan from its page.
+        let mut page_cancels: std::collections::BTreeMap<u8, std::sync::Arc<std::sync::atomic::AtomicBool>> =
+            std::collections::BTreeMap::new();
         for (route, _, _) in Route::meta() {
             // Protection stays opt-in: its scan uploads every binary in
             // /Applications to clamd — minutes behind a bare spinner.
             if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                 continue;
             }
-            self.pages.entry(Self::key(*route)).or_default().busy = true;
+            let key = Self::key(*route);
+            let page = self.pages.entry(key).or_default();
+            page.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+            page.busy = true;
+            page_cancels.insert(key, page.cancel.clone());
         }
         thread::spawn(move || {
             for (route, _, _) in Route::meta() {
                 if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                     continue;
                 }
+                let key = SweepApp::key(*route);
+                let cancel = page_cancels
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
                 let scanners = route.scanners();
                 let mut all = Vec::new();
                 for s in scanners {
-                    let outcome = s.scan(&|_| {});
+                    let c = cancel.clone();
+                    let outcome = s.scan(&|_| {}, &|| c.load(std::sync::atomic::Ordering::SeqCst));
                     for item in outcome.items {
                         all.push(item);
                     }
                 }
-                let key = SweepApp::key(*route);
                 if tx.send((key, all)).is_err() {
                     break;
                 }
