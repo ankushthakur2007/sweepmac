@@ -40,7 +40,7 @@ impl Route {
             (Applications, "Applications", "Leftover app data"),
             (Privacy, "Privacy", "Browser data"),
             (Performance, "Performance", "Startup items audit"),
-            (Protection, "Protection", "Suspicious files audit"),
+            (Protection, "Protection", "Quarantine + daemon audit"),
             (Clutter, "My Clutter", "Old & large files"),
             (SpaceLens, "Space Lens", "Large folders"),
         ]
@@ -881,7 +881,7 @@ impl SweepApp {
 
         egui::SidePanel::left("nav").resizable(false).show(ctx, |ui| {
             ui.heading("SweepMac");
-            ui.label(egui::RichText::new("v0.2 · P2").weak());
+            ui.label(egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak());
             ui.separator();
             for (route, label, sub) in Route::meta() {
                 if *route == Route::Welcome && self.route != Route::Welcome {
@@ -956,13 +956,6 @@ impl SweepApp {
                         ctx.request_repaint();
                     }
                 }
-            }
-            // One-click "share on X" — opens a pre-filled tweet so users can
-            // spread the word without copy-pasting a URL.
-            if ui.small_button("Share on X").clicked() {
-                let text = "I'm using SweepMac — a free, open-source Mac cleaner (3.2 MB, no subscription). Everything goes to Trash, malware scan via ClamAV, menu-bar health monitor. https://github.com/ankushthakur2007/sweepmac";
-                let url = format!("https://twitter.com/intent/tweet?text={}", text.replace(' ', "%20"));
-                let _ = std::process::Command::new("open").arg(&url).spawn();
             }
             if let Some(m) = &self.update_msg {
                 ui.label(egui::RichText::new(m).small().weak());
