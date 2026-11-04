@@ -15,9 +15,15 @@ fn push_file(out: &mut Vec<JunkItem>, path: PathBuf, category: &str) {
 fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
     // (label, profile dir relative to ~, [(file, category suffix)])
     let chromium: &[(&str, &str)] = &[
-        ("Chrome", "Library/Application Support/Google/Chrome/Default"),
+        (
+            "Chrome",
+            "Library/Application Support/Google/Chrome/Default",
+        ),
         ("Edge", "Library/Application Support/Microsoft Edge/Default"),
-        ("Brave", "Library/Application Support/BraveSoftware/Brave-Browser/Default"),
+        (
+            "Brave",
+            "Library/Application Support/BraveSoftware/Brave-Browser/Default",
+        ),
         ("Arc", "Library/Application Support/Arc/User Data/Default"),
     ];
     let total = (chromium.len() + 2) as u64;
@@ -37,9 +43,18 @@ fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
             continue;
         }
         push_file(&mut out, dir.join("History"), &format!("{browser} history"));
-        push_file(&mut out, dir.join("History-journal"), &format!("{browser} history"));
+        push_file(
+            &mut out,
+            dir.join("History-journal"),
+            &format!("{browser} history"),
+        );
         // Chromium ≥96 keeps cookies under Network/; older versions at the profile root.
-        for rel in ["Cookies", "Cookies-journal", "Network/Cookies", "Network/Cookies-journal"] {
+        for rel in [
+            "Cookies",
+            "Cookies-journal",
+            "Network/Cookies",
+            "Network/Cookies-journal",
+        ] {
             push_file(&mut out, dir.join(rel), &format!("{browser} cookies"));
         }
     }
@@ -69,9 +84,21 @@ fn scan_home(home: &Path, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
         bytes: out.iter().map(|j: &JunkItem| j.size).sum(),
         label: "Safari".into(),
     });
-    push_file(&mut out, home.join("Library/Safari/History.db"), "Safari history");
-    push_file(&mut out, home.join("Library/Safari/Cookies.binarycookies"), "Safari cookies");
-    push_file(&mut out, home.join("Library/Cookies/Cookies.binarycookies"), "Safari cookies");
+    push_file(
+        &mut out,
+        home.join("Library/Safari/History.db"),
+        "Safari history",
+    );
+    push_file(
+        &mut out,
+        home.join("Library/Safari/Cookies.binarycookies"),
+        "Safari cookies",
+    );
+    push_file(
+        &mut out,
+        home.join("Library/Cookies/Cookies.binarycookies"),
+        "Safari cookies",
+    );
 
     out.sort_by(|a, b| b.size.cmp(&a.size));
     on_progress(Progress {
@@ -91,7 +118,10 @@ impl Scanner for Privacy {
         "Browser Data"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        scan_home(&home(), on_progress)
+        match home() {
+            Some(h) => scan_home(&h, on_progress),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -101,11 +131,10 @@ mod tests {
 
     #[test]
     fn finds_fake_profile_tree() {
-        let root = std::env::temp_dir()
-            .join(format!("sweep-privacy-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("sweep-privacy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let chrome = root.join("Library/Application Support/Google/Chrome/Default");
-        std::fs::create_dir_all(&chrome.join("Network")).unwrap();
+        std::fs::create_dir_all(chrome.join("Network")).unwrap();
         std::fs::write(chrome.join("History"), vec![0u8; 10]).unwrap();
         std::fs::write(chrome.join("Cookies"), vec![0u8; 20]).unwrap(); // pre-96 layout
         std::fs::write(chrome.join("Network/Cookies"), vec![0u8; 25]).unwrap(); // Chromium ≥96
@@ -118,12 +147,24 @@ mod tests {
         std::fs::write(safari.join("History.db"), vec![0u8; 50]).unwrap();
 
         let items = scan_home(&root, &|_| {});
-        assert!(items.iter().any(|j| j.category == "Chrome history" && j.size == 10));
-        assert!(items.iter().any(|j| j.category == "Chrome cookies" && j.size == 20));
-        assert!(items.iter().any(|j| j.category == "Chrome cookies" && j.size == 25)); // Network/Cookies
-        assert!(items.iter().any(|j| j.category == "Firefox history" && j.size == 30));
-        assert!(items.iter().any(|j| j.category == "Firefox cookies" && j.size == 40));
-        assert!(items.iter().any(|j| j.category == "Safari history" && j.size == 50));
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Chrome history" && j.size == 10));
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Chrome cookies" && j.size == 20));
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Chrome cookies" && j.size == 25)); // Network/Cookies
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Firefox history" && j.size == 30));
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Firefox cookies" && j.size == 40));
+        assert!(items
+            .iter()
+            .any(|j| j.category == "Safari history" && j.size == 50));
         assert!(items.iter().all(|j| j.selected));
         // Absent browsers skipped, not errored.
         assert!(!items.iter().any(|j| j.category.starts_with("Edge")));

@@ -120,7 +120,13 @@ mod tests {
 
     fn gh_response(body: &str) -> String {
         let mut p = std::env::temp_dir();
-        p.push(format!("sweep-gh-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        p.push(format!(
+            "sweep-gh-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         format!("file://{}", p.display())
@@ -128,7 +134,9 @@ mod tests {
 
     #[test]
     fn newer_tag_yields_release() {
-        let url = gh_response(r#"{"html_url":"https://github.com/u/r/releases/tag/v9.9.9","tag_name":"v9.9.9","body":"notes"}"#);
+        let url = gh_response(
+            r#"{"html_url":"https://github.com/u/r/releases/tag/v9.9.9","tag_name":"v9.9.9","body":"notes"}"#,
+        );
         let r = check(&url).unwrap().expect("expected Some");
         assert_eq!(r.version, "v9.9.9");
         assert_eq!(r.url, "https://github.com/u/r/releases/tag/v9.9.9");
@@ -136,7 +144,9 @@ mod tests {
 
     #[test]
     fn same_tag_returns_none() {
-        let url = gh_response(&format!(r#"{{"html_url":"https://x","tag_name":"v{CURRENT}"}}"#));
+        let url = gh_response(&format!(
+            r#"{{"html_url":"https://x","tag_name":"v{CURRENT}"}}"#
+        ));
         assert!(check(&url).unwrap().is_none());
     }
 
@@ -153,7 +163,9 @@ mod tests {
 
     #[test]
     fn rate_limit_message_is_surfaced() {
-        let url = gh_response(r#"{"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"https://docs.github.com"}"#);
+        let url = gh_response(
+            r#"{"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"https://docs.github.com"}"#,
+        );
         let err = check(&url).unwrap_err();
         assert!(err.contains("API rate limit exceeded"), "{err}");
     }

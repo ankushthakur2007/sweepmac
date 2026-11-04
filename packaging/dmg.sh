@@ -2,7 +2,11 @@
 # Builds SweepMac-<ver>.dmg: drag-to-Applications installer. Idempotent.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VER="${1:-0.2.0}"
+if [ -z "${1:-}" ]; then
+    echo "usage: dmg.sh <version>" >&2
+    exit 1
+fi
+VER="$1"
 DMG="$ROOT/SweepMac-$VER.dmg"
 STAGE="$(mktemp -d /tmp/sweepmac-dmg.XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT

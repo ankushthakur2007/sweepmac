@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 /// Real ignore-list file.
 pub fn file() -> PathBuf {
-    crate::home().join(".sweepmac/ignored")
+    crate::home()
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .join(".sweepmac/ignored")
 }
 
 fn norm(s: &str) -> String {
@@ -42,13 +44,19 @@ pub fn save_to(file: &Path, set: &HashSet<String>) -> Result<(), String> {
     std::fs::write(file, body).map_err(|e| e.to_string())
 }
 
-/// Load the real ignore list (missing file → empty).
+/// Load the real ignore list (missing file → empty; no HOME → empty).
 pub fn load() -> HashSet<String> {
+    if crate::home().is_none() {
+        return HashSet::new();
+    }
     load_from(&file())
 }
 
 /// Persist the real ignore list.
 pub fn save(set: &HashSet<String>) -> Result<(), String> {
+    if crate::home().is_none() {
+        return Err("HOME is not set".into());
+    }
     save_to(&file(), set)
 }
 
@@ -65,6 +73,9 @@ pub fn add_to(file: &Path, path_str: &str) -> Result<(), String> {
 
 /// Add one path to the real ignore list.
 pub fn add(path_str: &str) -> Result<(), String> {
+    if crate::home().is_none() {
+        return Err("HOME is not set".into());
+    }
     add_to(&file(), path_str)
 }
 
@@ -91,11 +102,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!(
-            "sweep-ignore-{}-{}.txt",
-            std::process::id(),
-            n
-        ))
+        std::env::temp_dir().join(format!("sweep-ignore-{}-{}.txt", std::process::id(), n))
     }
 
     #[test]

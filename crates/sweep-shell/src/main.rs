@@ -8,9 +8,9 @@ use std::thread;
 use eframe::egui;
 use sweep_core::{fmt_bytes, ignore, snapshot, trash_paths, CleanResult, JunkItem, Progress};
 
-mod updater;
 mod loginitems;
 mod tray;
+mod updater;
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(10, 132, 255);
 
@@ -62,6 +62,7 @@ impl Route {
 enum WorkerMsg {
     Progress(Progress),
     Done(Vec<JunkItem>),
+    Incomplete(Vec<JunkItem>, String),
     Cleaned(sweep_core::CleanResult),
 }
 
@@ -80,47 +81,79 @@ impl ModulePage {
     fn pump(&mut self) {
         let mut finished = false;
         if let Some(rx) = &self.rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    WorkerMsg::Progress(p) => self.progress = p,
-                    WorkerMsg::Done(items) => {
-                        let ignored = ignore::load();
-                        let items: Vec<JunkItem> =
-                            items.into_iter().filter(|i| !ignore::is_ignored(&i.path, &ignored)).collect();
-                        let total: u64 = items.iter().map(|i| i.size).sum();
-                        // malware.rs reports unreadable/clamd-failed files in its
-                        // final progress label — never claim "clean" after one.
-                        let incomplete = self.progress.label.contains("could not be scanned");
-                        self.status = if items.is_empty() {
-                            if incomplete {
-                                self.progress.label.clone()
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => match msg {
+                        WorkerMsg::Progress(p) => self.progress = p,
+                        WorkerMsg::Done(items) => {
+                            let ignored = ignore::load();
+                            let items: Vec<JunkItem> = items
+                                .into_iter()
+                                .filter(|i| !ignore::is_ignored(&i.path, &ignored))
+                                .collect();
+                            let total: u64 = items.iter().map(|i| i.size).sum();
+                            // malware.rs reports unreadable/clamd-failed files in its
+                            // final progress label — never claim "clean" after one.
+                            let incomplete = self.progress.label.contains("could not be scanned");
+                            self.status = if items.is_empty() {
+                                if incomplete {
+                                    self.progress.label.clone()
+                                } else {
+                                    "Nothing found — this area is clean.".into()
+                                }
                             } else {
-                                "Nothing found — this area is clean.".into()
-                            }
-                        } else {
-                            let found = format!("Found {} items ({})", items.len(), fmt_bytes(total));
-                            if incomplete {
-                                format!("{found} · {}", self.progress.label)
-                            } else {
-                                found
-                            }
-                        };
-                        self.items = items;
-                        self.busy = false;
-                        finished = true;
-                    }
-                    WorkerMsg::Cleaned(r) => {
-                        self.status = if r.errors.is_empty() {
-                            "Moved to Trash. Undo from the Trash if needed.".into()
-                        } else {
-                            format!("Finished with {} errors — see terminal.", r.errors.len())
-                        };
-                        for e in r.errors {
-                            eprintln!("clean error: {e}");
+                                let found =
+                                    format!("Found {} items ({})", items.len(), fmt_bytes(total));
+                                if incomplete {
+                                    format!("{found} · {}", self.progress.label)
+                                } else {
+                                    found
+                                }
+                            };
+                            self.items = items;
+                            self.busy = false;
+                            finished = true;
                         }
-                        self.items.clear();
+                        WorkerMsg::Incomplete(items, reason) => {
+                            let ignored = ignore::load();
+                            let items: Vec<JunkItem> = items
+                                .into_iter()
+                                .filter(|i| !ignore::is_ignored(&i.path, &ignored))
+                                .collect();
+                            let n = items.len();
+                            self.status = if n == 0 {
+                                reason.clone()
+                            } else {
+                                format!("{n} found, but scan incomplete: {reason}")
+                            };
+                            self.items = items;
+                            self.busy = false;
+                            finished = true;
+                        }
+                        WorkerMsg::Cleaned(r) => {
+                            for e in &r.errors {
+                                eprintln!("clean error: {e}");
+                            }
+                            if r.errors.is_empty() {
+                                self.status =
+                                    "Moved to Trash. Undo from the Trash if needed.".into();
+                                self.items.clear();
+                            } else {
+                                self.status = format!(
+                                    "Finished with {} errors — press Scan to refresh.",
+                                    r.errors.len()
+                                );
+                            }
+                            self.busy = false;
+                            finished = true;
+                        }
+                    },
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.status = "Scan failed (worker crashed)".into();
                         self.busy = false;
                         finished = true;
+                        break;
                     }
                 }
             }
@@ -165,7 +198,12 @@ impl ModulePage {
         self.status = "Scanning…".into();
         thread::spawn(move || {
             let mut all = Vec::new();
+            let mut unavailable: Vec<String> = Vec::new();
             for s in &scanners {
+                if !s.is_available() {
+                    unavailable.push(s.name().to_string());
+                    continue;
+                }
                 let tag = s.name().to_string();
                 for item in s.scan(&|p| {
                     let _ = tx.send(WorkerMsg::Progress(Progress {
@@ -176,19 +214,25 @@ impl ModulePage {
                     all.push(item);
                 }
             }
-            let _ = tx.send(WorkerMsg::Done(all));
+            if unavailable.is_empty() {
+                let _ = tx.send(WorkerMsg::Done(all));
+            } else {
+                let reason = format!("{} not available", unavailable.join(", "));
+                let _ = tx.send(WorkerMsg::Incomplete(all, reason));
+            }
         });
     }
 
     fn clean(&mut self, disabler: Option<fn(&JunkItem) -> Result<String, String>>) {
-        let selected: Vec<JunkItem> =
-            self.items.iter().filter(|i| i.selected).cloned().collect();
+        let selected: Vec<JunkItem> = self.items.iter().filter(|i| i.selected).cloned().collect();
         if selected.is_empty() {
             return;
         }
         // Pre-clean snapshot: never clean what we didn't record.
-        let snap_items: Vec<(std::path::PathBuf, u64, String)> =
-            selected.iter().map(|i| (i.path.clone(), i.size, i.category.clone())).collect();
+        let snap_items: Vec<(std::path::PathBuf, u64, String)> = selected
+            .iter()
+            .map(|i| (i.path.clone(), i.size, i.category.clone()))
+            .collect();
         if let Err(e) = snapshot::save_to(&snapshot::dir(), &snap_items) {
             self.status = format!("Snapshot failed ({e}) — clean aborted.");
             self.busy = false;
@@ -197,7 +241,11 @@ impl ModulePage {
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
         self.rx = Some(rx);
         self.busy = true;
-        self.status = if disabler.is_some() { "Disabling…".into() } else { "Moving to Trash…".into() };
+        self.status = if disabler.is_some() {
+            "Disabling…".into()
+        } else {
+            "Moving to Trash…".into()
+        };
         thread::spawn(move || {
             let mut out = CleanResult::default();
             match disabler {
@@ -215,7 +263,8 @@ impl ModulePage {
                     }
                 }
                 None => {
-                    let paths: Vec<std::path::PathBuf> = selected.iter().map(|i| i.path.clone()).collect();
+                    let paths: Vec<std::path::PathBuf> =
+                        selected.iter().map(|i| i.path.clone()).collect();
                     out = trash_paths(&paths);
                 }
             }
@@ -235,7 +284,10 @@ fn cached_clam_status() -> String {
         .map(|(_, t)| t.elapsed() > std::time::Duration::from_secs(5))
         .unwrap_or(true);
     if stale {
-        *g = Some((sweep_scanners::clamsetup::status(), std::time::Instant::now()));
+        *g = Some((
+            sweep_scanners::clamsetup::status(),
+            std::time::Instant::now(),
+        ));
     }
     g.as_ref().unwrap().0.clone()
 }
@@ -277,6 +329,36 @@ fn fda_granted() -> bool {
         .any(|sub| std::fs::read_dir(format!("{home}/{sub}")).is_ok())
 }
 
+fn disabled_labels() -> Vec<String> {
+    let dir = sweep_core::home()
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .join(".sweepmac/disabled");
+    let mut labels = std::collections::BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.filter_map(|x| x.ok()) {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".plist") {
+                continue;
+            }
+            let stem = name.trim_end_matches(".plist");
+            let label = if let Some((prefix, num)) = stem.rsplit_once('-') {
+                if !prefix.is_empty()
+                    && num.chars().all(|c| c.is_ascii_digit())
+                    && num.parse::<u64>().map(|n| n >= 2).unwrap_or(false)
+                {
+                    prefix.to_string()
+                } else {
+                    stem.to_string()
+                }
+            } else {
+                stem.to_string()
+            };
+            labels.insert(label);
+        }
+    }
+    labels.into_iter().collect()
+}
+
 struct SweepApp {
     route: Route,
     pages: BTreeMap<u8, ModulePage>,
@@ -294,8 +376,22 @@ impl Default for SweepApp {
         let mut pages = BTreeMap::new();
         pages.insert(0, ModulePage::default());
         pages.insert(1, ModulePage::default());
-        let start = if onboarded_file().exists() { Route::SmartCare } else { Route::Welcome };
-        let mut app = Self { route: start, pages, totals: BTreeMap::new(), bulk_rx: None, bulk_busy: false, update_msg: None, update_busy: false, tray_mounted: false, update_failed: false };
+        let start = if onboarded_file().exists() {
+            Route::SmartCare
+        } else {
+            Route::Welcome
+        };
+        let mut app = Self {
+            route: start,
+            pages,
+            totals: BTreeMap::new(),
+            bulk_rx: None,
+            bulk_busy: false,
+            update_msg: None,
+            update_busy: false,
+            tray_mounted: false,
+            update_failed: false,
+        };
         app.page_mut().status = "Press Scan to see what can be reclaimed.".into();
         app
     }
@@ -327,25 +423,14 @@ impl SweepApp {
         // Auto-starts once per session when protection isn't ready — the user
         // should never have to touch a terminal.
         if route == Route::Protection {
-            static AUTO_SETUP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            let state = cached_clam_status();
-            let needs_setup = !state.starts_with("Protected");
-            if needs_setup
-                && !AUTO_SETUP.swap(true, std::sync::atomic::Ordering::SeqCst)
-                && self.page_mut().setup_rx.is_none()
-            {
-                let (tx, rx) = mpsc::channel::<String>();
-                self.page_mut().setup_rx = Some(rx);
-                self.page_mut().busy = true;
-                thread::spawn(move || {
-                    sweep_scanners::clamsetup::setup(tx);
-                });
-            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(cached_clam_status()).strong());
                 let running = self.page_mut().setup_rx.is_some();
-                if ui.add_enabled(!running, egui::Button::new("Set up protection")).clicked() {
+                if ui
+                    .add_enabled(!running, egui::Button::new("Set up protection"))
+                    .clicked()
+                {
                     let (tx, rx) = mpsc::channel::<String>();
                     self.page_mut().setup_rx = Some(rx);
                     self.page_mut().setup_log.clear();
@@ -354,7 +439,10 @@ impl SweepApp {
                         sweep_scanners::clamsetup::setup(tx);
                     });
                 }
-                if ui.add_enabled(!running, egui::Button::new("Update signatures")).clicked() {
+                if ui
+                    .add_enabled(!running, egui::Button::new("Update signatures"))
+                    .clicked()
+                {
                     let (tx, rx) = mpsc::channel::<String>();
                     self.page_mut().setup_rx = Some(rx);
                     self.page_mut().setup_log.clear();
@@ -384,7 +472,15 @@ impl SweepApp {
                     });
                 }
             });
-            let log: Vec<String> = self.page_mut().setup_log.iter().rev().take(6).rev().cloned().collect();
+            let log: Vec<String> = self
+                .page_mut()
+                .setup_log
+                .iter()
+                .rev()
+                .take(6)
+                .rev()
+                .cloned()
+                .collect();
             for line in log {
                 ui.label(egui::RichText::new(line).small().weak());
             }
@@ -406,15 +502,32 @@ impl SweepApp {
             let cleanable = route != Route::SpaceLens;
             let clean_btn = ui.add_enabled(
                 !busy && has_sel && cleanable,
-                egui::Button::new(egui::RichText::new("Clean selected").color(egui::Color32::from_rgb(200, 40, 40))),
+                egui::Button::new(
+                    egui::RichText::new("Clean selected")
+                        .color(egui::Color32::from_rgb(200, 40, 40)),
+                ),
             );
             if clean_btn.clicked() {
                 let disabler = match route {
                     // Login items are disabled (moved aside + bootout), never trashed.
-                    Route::Performance => Some(sweep_scanners::performance::disable as fn(&JunkItem) -> Result<String, String>),
+                    Route::Performance => Some(
+                        sweep_scanners::performance::disable
+                            as fn(&JunkItem) -> Result<String, String>,
+                    ),
                     _ => None,
                 };
                 self.page_mut().clean(disabler);
+            }
+            if route == Route::Performance {
+                for label in disabled_labels() {
+                    if ui.small_button(format!("Restore {label}")).clicked() {
+                        let msg = match sweep_scanners::performance::restore(&label) {
+                            Ok(m) => m,
+                            Err(e) => format!("Restore failed: {e}"),
+                        };
+                        self.page_mut().status = msg;
+                    }
+                }
             }
             if busy {
                 ui.spinner();
@@ -426,8 +539,10 @@ impl SweepApp {
             let page = self.page_mut();
             if page.busy && page.progress.total > 0 {
                 ui.add(
-                    egui::ProgressBar::new(page.progress.done as f32 / page.progress.total.max(1) as f32)
-                        .text(&page.progress.label),
+                    egui::ProgressBar::new(
+                        page.progress.done as f32 / page.progress.total.max(1) as f32,
+                    )
+                    .text(&page.progress.label),
                 );
             }
             ui.label(egui::RichText::new(&page.status).weak());
@@ -437,7 +552,12 @@ impl SweepApp {
         // Selection summary + select all/none.
         {
             let page = self.page_mut();
-            let sel: u64 = page.items.iter().filter(|i| i.selected).map(|i| i.size).sum();
+            let sel: u64 = page
+                .items
+                .iter()
+                .filter(|i| i.selected)
+                .map(|i| i.size)
+                .sum();
             ui.horizontal(|ui| {
                 ui.strong(format!("Selected: {}", fmt_bytes(sel)));
                 if ui.small_button("All").clicked() {
@@ -519,6 +639,10 @@ impl SweepApp {
             if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                 continue;
             }
+            let scanners = route.scanners();
+            if scanners.iter().any(|s| !s.is_available()) {
+                continue;
+            }
             self.pages.entry(Self::key(*route)).or_default().busy = true;
         }
         thread::spawn(move || {
@@ -526,8 +650,12 @@ impl SweepApp {
                 if matches!(route, Route::SmartCare | Route::Welcome | Route::Protection) {
                     continue;
                 }
+                let scanners = route.scanners();
+                if scanners.iter().any(|s| !s.is_available()) {
+                    continue;
+                }
                 let mut all = Vec::new();
-                for s in route.scanners() {
+                for s in scanners {
                     for item in s.scan(&|_| {}) {
                         all.push(item);
                     }
@@ -544,8 +672,10 @@ impl SweepApp {
         ui.heading("Smart Care");
         ui.label(egui::RichText::new("All systems at a glance").weak());
         ui.add_space(8.0);
-        let (n, bytes): (usize, u64) =
-            self.totals.values().fold((0, 0), |(c, b), (cc, bb)| (c + cc, b + bb));
+        let (n, bytes): (usize, u64) = self
+            .totals
+            .values()
+            .fold((0, 0), |(c, b), (cc, bb)| (c + cc, b + bb));
         if self.totals.is_empty() {
             ui.label("Not scanned yet — press Scan all for a full checkup.");
         } else {
@@ -586,22 +716,39 @@ impl SweepApp {
 
     fn render_welcome(&mut self, ui: &mut egui::Ui) {
         ui.heading("Welcome to SweepMac");
-        ui.label(egui::RichText::new("A Mac cleaner that moves things to Trash — nothing is deleted outright.").weak());
+        ui.label(
+            egui::RichText::new(
+                "A Mac cleaner that moves things to Trash — nothing is deleted outright.",
+            )
+            .weak(),
+        );
         ui.add_space(8.0);
         ui.label("• Reclaim space: caches, logs, trash, leftover app data, old downloads.");
         ui.label("• Stay private: browser histories and cookies (close browsers first).");
-        ui.label("• Stay safe: startup and protection areas are audit-first, reversible where possible.");
+        ui.label(
+            "• Stay safe: startup and protection areas are audit-first, reversible where possible.",
+        );
         ui.add_space(8.0);
         ui.strong("Permissions");
         ui.label("Privacy and system caches need Full Disk Access (FDA). Without it, those scans return less.");
-        ui.label(format!("Full Disk Access: {}", if cached5("fda", fda_granted) { "granted" } else { "limited" }));
+        ui.label(format!(
+            "Full Disk Access: {}",
+            if cached5("fda", fda_granted) {
+                "granted"
+            } else {
+                "limited"
+            }
+        ));
         ui.horizontal(|ui| {
             if ui.button("Open System Settings").clicked() {
                 let _ = std::process::Command::new("open")
                     .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
                     .spawn();
             }
-            if ui.add(egui::Button::new("Get started").fill(ACCENT)).clicked() {
+            if ui
+                .add(egui::Button::new("Get started").fill(ACCENT))
+                .clicked()
+            {
                 let f = onboarded_file();
                 if let Some(p) = f.parent() {
                     let _ = std::fs::create_dir_all(p);
@@ -655,12 +802,17 @@ impl SweepApp {
             }
         }
         if self.bulk_rx.is_some() {
-            let msgs: Vec<(u8, Vec<JunkItem>)> =
-                self.bulk_rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+            let msgs: Vec<(u8, Vec<JunkItem>)> = self
+                .bulk_rx
+                .as_ref()
+                .map(|rx| rx.try_iter().collect())
+                .unwrap_or_default();
             let ignored = ignore::load();
             for (key, items) in msgs {
-                let items: Vec<JunkItem> =
-                    items.into_iter().filter(|i| !ignore::is_ignored(&i.path, &ignored)).collect();
+                let items: Vec<JunkItem> = items
+                    .into_iter()
+                    .filter(|i| !ignore::is_ignored(&i.path, &ignored))
+                    .collect();
                 let total: u64 = items.iter().map(|i| i.size).sum();
                 let n = items.len();
                 if let Some(page) = self.pages.get_mut(&key) {
@@ -837,7 +989,8 @@ mod tests {
             busy: true,
             ..Default::default()
         };
-        tx.send("clamd started but not answering yet — retry shortly.".into()).unwrap();
+        tx.send("clamd started but not answering yet — retry shortly.".into())
+            .unwrap();
         drop(tx); // setup thread ends without ever matching a "done" phrase
         page.pump();
         assert!(!page.busy, "disconnect must clear busy");

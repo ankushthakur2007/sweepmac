@@ -12,17 +12,25 @@ const STALE_DAYS: u64 = 180;
 
 fn is_installer(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "dmg" | "pkg" | "mpkg" | "zip"),
+        Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "dmg" | "pkg" | "mpkg"),
         None => false,
     }
 }
 
 fn age_days(mtime: SystemTime) -> Option<u64> {
-    SystemTime::now().duration_since(mtime).ok().map(|d| d.as_secs() / 86400)
+    SystemTime::now()
+        .duration_since(mtime)
+        .ok()
+        .map(|d| d.as_secs() / 86400)
 }
 
 /// Classify one file; first match wins: large > old installer > stale download.
-fn classify(path: &Path, len: u64, age: Option<u64>, in_downloads: bool) -> Option<(&'static str, bool)> {
+fn classify(
+    path: &Path,
+    len: u64,
+    age: Option<u64>,
+    in_downloads: bool,
+) -> Option<(&'static str, bool)> {
     if len > LARGE_BYTES {
         return Some(("Large file", false));
     }
@@ -57,7 +65,8 @@ fn is_system_skipped(p: &Path) -> bool {
         "/Volumes", // mounted volumes must never be walked
     ];
     let s = p.to_string_lossy();
-    SKIP.iter().any(|k| s == *k || s.starts_with(&format!("{k}/")))
+    SKIP.iter()
+        .any(|k| s == *k || s.starts_with(&format!("{k}/")))
 }
 
 fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
@@ -66,7 +75,9 @@ fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
         .max_depth(4)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !is_hidden_dir(e) && !is_system_skipped(e.path()) && !sweep_core::is_protected(e.path()))
+        .filter_entry(|e| {
+            !is_hidden_dir(e) && !is_system_skipped(e.path()) && !sweep_core::is_protected(e.path())
+        })
         .filter_map(|e| e.ok());
     for entry in walker {
         if !entry.file_type().is_file() {
@@ -74,8 +85,15 @@ fn scan_root(root: &Path, in_downloads: bool) -> Vec<JunkItem> {
         }
         let Ok(md) = entry.metadata() else { continue };
         let age = md.modified().ok().and_then(age_days);
-        let Some((category, selected)) = classify(entry.path(), md.len(), age, in_downloads) else { continue };
-        out.push(JunkItem { path: entry.path().to_path_buf(), size: md.len(), category: category.into(), selected });
+        let Some((category, selected)) = classify(entry.path(), md.len(), age, in_downloads) else {
+            continue;
+        };
+        out.push(JunkItem {
+            path: entry.path().to_path_buf(),
+            size: md.len(),
+            category: category.into(),
+            selected,
+        });
     }
     out
 }
@@ -103,7 +121,7 @@ impl Scanner for Clutter {
         "Old & Large Files"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        let h = home();
+        let h = home().unwrap_or_else(|| PathBuf::from("/"));
         let downloads = h.join("Downloads");
         // System-scoped like every other module: whole drive (SIP paths
         // pruned in scan_root), all users, apps, libraries — not just home.
@@ -132,7 +150,12 @@ impl Scanner for Clutter {
             }
         }
         let out = dedupe_by_path(out);
-        on_progress(Progress { done: total, total, bytes: out.iter().map(|j| j.size).sum(), label: "done".into() });
+        on_progress(Progress {
+            done: total,
+            total,
+            bytes: out.iter().map(|j| j.size).sum(),
+            label: "done".into(),
+        });
         out
     }
 }
@@ -149,7 +172,10 @@ mod tests {
             "clutter-{}-{}-{}",
             case,
             std::process::id(),
-            SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -166,7 +192,10 @@ mod tests {
     fn large_file_rule_fires_on_fresh_sparse_file() {
         let root = tmp_root("large");
         let big = root.join("movie.mkv");
-        std::fs::File::create(&big).unwrap().set_len(LARGE_BYTES + 1).unwrap();
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(LARGE_BYTES + 1)
+            .unwrap();
         std::fs::write(root.join("small.txt"), b"hi").unwrap();
         let items = scan_root(&root, false);
         assert_eq!(items.len(), 1);
@@ -178,10 +207,22 @@ mod tests {
 
     #[test]
     fn installer_extension_match_but_fresh_files_not_flagged() {
-        for (name, want) in [("x.dmg", true), ("x.pkg", true), ("x.mpkg", true), ("x.zip", true), ("x.DMG", true), ("x.txt", false), ("x.app", false), ("noext", false)] {
+        for (name, want) in [
+            ("x.dmg", true),
+            ("x.pkg", true),
+            ("x.mpkg", true),
+            ("x.zip", false),
+            ("x.DMG", true),
+            ("x.txt", false),
+            ("x.app", false),
+            ("noext", false),
+        ] {
             assert_eq!(is_installer(Path::new(name)), want, "{name}");
         }
-        assert_eq!(classify(Path::new("x.dmg"), 100, Some(31), false), Some(("Old installer", true)));
+        assert_eq!(
+            classify(Path::new("x.dmg"), 100, Some(31), false),
+            Some(("Old installer", true))
+        );
         assert_eq!(classify(Path::new("x.dmg"), 100, Some(0), false), None);
         assert_eq!(classify(Path::new("x.dmg"), 100, None, false), None);
         // End to end: a fresh installer on disk is recognised but not flagged.
@@ -195,7 +236,10 @@ mod tests {
     #[test]
     fn stale_download_needs_downloads_root_and_age() {
         let p = Path::new("old.pdf");
-        assert_eq!(classify(p, 100, Some(200), true), Some(("Stale download", false)));
+        assert_eq!(
+            classify(p, 100, Some(200), true),
+            Some(("Stale download", false))
+        );
         assert_eq!(classify(p, 100, Some(200), false), None);
         assert_eq!(classify(p, 100, Some(10), true), None);
         assert_eq!(classify(p, 100, None, true), None);
@@ -206,7 +250,10 @@ mod tests {
         let root = tmp_root("hidden");
         let hidden = root.join(".hidden");
         std::fs::create_dir_all(&hidden).unwrap();
-        std::fs::File::create(hidden.join("big.bin")).unwrap().set_len(LARGE_BYTES + 1).unwrap();
+        std::fs::File::create(hidden.join("big.bin"))
+            .unwrap()
+            .set_len(LARGE_BYTES + 1)
+            .unwrap();
         assert!(scan_root(&root, false).is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -217,11 +264,18 @@ mod tests {
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let big = nested.join("big.bin");
-        std::fs::File::create(&big).unwrap().set_len(LARGE_BYTES + 1).unwrap();
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(LARGE_BYTES + 1)
+            .unwrap();
         // Both the outer and the nested root find the same file.
         let mut items = scan_root(&root, false);
         items.extend(scan_root(&nested, false));
-        assert_eq!(items.len(), 2, "precondition: overlapping roots duplicate the file");
+        assert_eq!(
+            items.len(),
+            2,
+            "precondition: overlapping roots duplicate the file"
+        );
         let out = dedupe_by_path(items);
         assert_eq!(out.len(), 1, "duplicate rows must collapse: {out:?}");
         assert_eq!(out[0].path, big);

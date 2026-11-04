@@ -8,7 +8,12 @@ use sweep_core::{file_size, home, unselected, JunkItem, Progress, Scanner};
 fn is_candidate_ext(p: &Path) -> bool {
     p.extension()
         .and_then(|s| s.to_str())
-        .map(|s| matches!(s.to_ascii_lowercase().as_str(), "dmg" | "pkg" | "sh" | "command"))
+        .map(|s| {
+            matches!(
+                s.to_ascii_lowercase().as_str(),
+                "dmg" | "pkg" | "sh" | "command"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -76,7 +81,13 @@ fn items_from_downloads(dir: &Path) -> Vec<JunkItem> {
         .filter(|e| !sweep_core::is_protected(e.path()))
         .filter(|e| is_candidate_ext(e.path()) || is_macho(e.path()))
         .filter(|e| has_quarantine(e.path()))
-        .map(|e| unselected(e.path().to_path_buf(), file_size(e.path()), "Quarantined download"))
+        .map(|e| {
+            unselected(
+                e.path().to_path_buf(),
+                file_size(e.path()),
+                "Quarantined download",
+            )
+        })
         .collect()
 }
 
@@ -112,7 +123,11 @@ fn items_from_daemon_dir(dir: &Path) -> Vec<JunkItem> {
             if label.starts_with("com.apple.") {
                 return None;
             }
-            Some(unselected(e.path().to_path_buf(), file_size(e.path()), "System daemon"))
+            Some(unselected(
+                e.path().to_path_buf(),
+                file_size(e.path()),
+                "System daemon",
+            ))
         })
         .collect()
 }
@@ -131,17 +146,39 @@ impl Scanner for Protection {
         let mut out = Vec::new();
         let total_bytes = |out: &[JunkItem]| out.iter().map(|j: &JunkItem| j.size).sum();
 
-        on_progress(Progress { done: 0, total: TOTAL, bytes: total_bytes(&out), label: "Downloads".into() });
-        out.extend(items_from_downloads(&home().join("Downloads")));
+        on_progress(Progress {
+            done: 0,
+            total: TOTAL,
+            bytes: total_bytes(&out),
+            label: "Downloads".into(),
+        });
+        if let Some(h) = home() {
+            out.extend(items_from_downloads(&h.join("Downloads")));
+        }
 
-        on_progress(Progress { done: 1, total: TOTAL, bytes: total_bytes(&out), label: "LaunchDaemons".into() });
+        on_progress(Progress {
+            done: 1,
+            total: TOTAL,
+            bytes: total_bytes(&out),
+            label: "LaunchDaemons".into(),
+        });
         out.extend(items_from_daemon_dir(Path::new("/Library/LaunchDaemons")));
 
-        on_progress(Progress { done: 2, total: TOTAL, bytes: total_bytes(&out), label: "LaunchAgents".into() });
+        on_progress(Progress {
+            done: 2,
+            total: TOTAL,
+            bytes: total_bytes(&out),
+            label: "LaunchAgents".into(),
+        });
         out.extend(items_from_daemon_dir(Path::new("/Library/LaunchAgents")));
 
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        on_progress(Progress { done: TOTAL, total: TOTAL, bytes: total_bytes(&out), label: "done".into() });
+        on_progress(Progress {
+            done: TOTAL,
+            total: TOTAL,
+            bytes: total_bytes(&out),
+            label: "done".into(),
+        });
         out
     }
 }
@@ -196,7 +233,9 @@ mod tests {
             return; // skip if quarantine xattr cannot be set (e.g. tmpfs)
         }
         let items = items_from_downloads(&dir);
-        assert!(items.iter().any(|i| i.path == hit && i.category == "Quarantined download" && !i.selected));
+        assert!(items
+            .iter()
+            .any(|i| i.path == hit && i.category == "Quarantined download" && !i.selected));
         assert!(!items.iter().any(|i| i.path == plain));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -224,8 +263,16 @@ mod tests {
     #[test]
     fn filters_apple_daemon_labels() {
         let dir = tmp_dir("daemon");
-        std::fs::write(dir.join("com.apple.foo.plist"), DAEMON_PLIST.replace("LABEL", "com.apple.foo")).unwrap();
-        std::fs::write(dir.join("com.example.bar.plist"), DAEMON_PLIST.replace("LABEL", "com.example.bar")).unwrap();
+        std::fs::write(
+            dir.join("com.apple.foo.plist"),
+            DAEMON_PLIST.replace("LABEL", "com.apple.foo"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("com.example.bar.plist"),
+            DAEMON_PLIST.replace("LABEL", "com.example.bar"),
+        )
+        .unwrap();
         std::fs::write(dir.join("broken.plist"), b"not a plist").unwrap();
         let items = items_from_daemon_dir(&dir);
         assert_eq!(items.len(), 1);

@@ -2,7 +2,7 @@
 //! Mirrors CleanMyMac's ApplicationsService leftover mapping (see REPLICA_PLAN.md).
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use sweep_core::{dir_size, home, JunkItem, Progress, Scanner};
+use sweep_core::{dir_size, home, unselected, JunkItem, Progress, Scanner};
 
 #[derive(Debug, Clone)]
 pub struct AppInfo {
@@ -15,37 +15,66 @@ fn read_bid(app_path: &Path) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     let data = std::fs::read(&plist).ok()?;
     let value: plist::Value = plist::from_bytes(&data).ok()?;
-    value.as_dictionary()?.get("CFBundleIdentifier")?.as_string().map(|s| s.to_string())
+    value
+        .as_dictionary()?
+        .get("CFBundleIdentifier")?
+        .as_string()
+        .map(|s| s.to_string())
 }
 
 fn push_app(out: &mut Vec<AppInfo>, p: PathBuf) {
     if p.extension().map(|e| e == "app").unwrap_or(false) && p.is_dir() {
-        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         let bid = read_bid(&p);
         out.push(AppInfo { name, path: p, bid });
     }
 }
 
 fn scan_apps_dir(dir: &Path, out: &mut Vec<AppInfo>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.filter_map(|e| e.ok()) {
         let p = entry.path();
         if p.extension().map(|e| e == "app").unwrap_or(false) {
             push_app(out, p);
         } else if p.is_dir() {
-            // One extra level: /Applications/Utilities, vendor folders, etc.
-            let Ok(sub) = std::fs::read_dir(&p) else { continue };
+            // Extra levels: /Applications/Utilities, vendor folders, etc.
+            let Ok(sub) = std::fs::read_dir(&p) else {
+                continue;
+            };
             for child in sub.filter_map(|e| e.ok()) {
-                push_app(out, child.path());
+                let cp = child.path();
+                if cp.extension().map(|e| e == "app").unwrap_or(false) {
+                    push_app(out, cp);
+                } else if cp.is_dir() {
+                    let Ok(grand) = std::fs::read_dir(&cp) else {
+                        continue;
+                    };
+                    for g in grand.filter_map(|e| e.ok()) {
+                        push_app(out, g.path());
+                    }
+                }
             }
         }
     }
 }
 
-/// Every .app in /Applications and ~/Applications (plus one level down).
+/// Every .app in /Applications, ~/Applications, /Applications/Utilities (plus nesting levels).
 pub fn list_apps() -> Vec<AppInfo> {
     let mut out = Vec::new();
-    for dir in [PathBuf::from("/Applications"), home().join("Applications")] {
+    let mut dirs = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
+    ];
+    if let Some(h) = home() {
+        dirs.push(h.join("Applications"));
+    }
+    for dir in dirs {
         scan_apps_dir(&dir, &mut out);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -54,11 +83,18 @@ pub fn list_apps() -> Vec<AppInfo> {
 
 /// Candidate leftover locations for one app. Only existing paths are returned;
 /// the caller decides whether they are orphans.
+#[allow(dead_code)]
 fn candidates_for(app: &AppInfo, h: &Path) -> Vec<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Some(bid) = &app.bid {
         let parts: Vec<&str> = bid.split('.').collect();
-        let vendor = parts.iter().take(parts.len().saturating_sub(1)).skip(1).cloned().collect::<Vec<_>>().join(".");
+        let vendor = parts
+            .iter()
+            .take(parts.len().saturating_sub(1))
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".");
         // Short bids (e.g. "com.foo") yield an empty vendor: never flag the bare parent.
         if !vendor.is_empty() {
             cands.push(h.join(format!("Library/Application Support/{vendor}")));
@@ -75,14 +111,15 @@ fn candidates_for(app: &AppInfo, h: &Path) -> Vec<PathBuf> {
         cands.push(h.join(format!("Library/Application Support/{}", app.name)));
         cands.push(h.join(format!("Library/Caches/{}", app.name)));
         cands.push(h.join(format!("Library/Preferences/{}.plist", app.name)));
-        cands.push(h.join(format!("Library/Saved Application State/{}.savedState", app.name)));
+        cands.push(h.join(format!(
+            "Library/Saved Application State/{}.savedState",
+            app.name
+        )));
     }
     cands.into_iter().filter(|p| p.exists()).collect()
 }
 
-fn leftovers_for(app: &AppInfo) -> Vec<PathBuf> {
-    candidates_for(app, &home())
-}
+// removed: bundle-id-less leftover loop deleted per audit finding 1.
 
 /// Orphan keys are reverse-DNS bundle ids (≥2 dots), never Apple system-app
 /// data (`com.apple.mediaanalysisd` etc.) — those apps are always present.
@@ -100,30 +137,32 @@ impl Scanner for Uninstaller {
         "App Leftovers"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        on_progress(Progress { done: 0, total: 2, bytes: 0, label: "Listing apps".into() });
+        on_progress(Progress {
+            done: 0,
+            total: 2,
+            bytes: 0,
+            label: "Listing apps".into(),
+        });
         let apps = list_apps();
         let installed: HashSet<String> = apps.iter().filter_map(|a| a.bid.clone()).collect();
         // Orphan leftovers: parents we sweep for bids no longer installed.
-        on_progress(Progress { done: 1, total: 2, bytes: 0, label: "Sweeping leftovers".into() });
+        on_progress(Progress {
+            done: 1,
+            total: 2,
+            bytes: 0,
+            label: "Sweeping leftovers".into(),
+        });
         let mut out = Vec::new();
-        // Installed apps own their support files; per-app candidates only apply to bid-less apps.
-        for app in apps.iter().filter(|a| a.bid.is_none()) {
-            for p in leftovers_for(app) {
-                if sweep_core::is_protected(&p) {
-                    continue;
-                }
-                let size = if p.is_dir() { dir_size(&p, 8) } else { p.metadata().map(|m| m.len()).unwrap_or(0) };
-                if size > 0 {
-                    out.push(JunkItem::new(
-                        p,
-                        size,
-                        &format!("Leftover · {}", app.name),
-                    ));
-                }
-            }
-        }
         // Also: leftover entries whose app is fully gone (bid on disk, app absent).
-        let h = home();
+        let Some(h) = home() else {
+            on_progress(Progress {
+                done: 2,
+                total: 2,
+                bytes: 0,
+                label: "done".into(),
+            });
+            return out;
+        };
         for parent in [
             "Library/Application Support",
             "Library/Caches",
@@ -132,7 +171,9 @@ impl Scanner for Uninstaller {
             "Library/Cookies",
             "Library/Logs",
         ] {
-            let Ok(rd) = std::fs::read_dir(h.join(parent)) else { continue };
+            let Ok(rd) = std::fs::read_dir(h.join(parent)) else {
+                continue;
+            };
             for entry in rd.filter_map(|e| e.ok()) {
                 let p = entry.path();
                 if sweep_core::is_protected(&p) {
@@ -154,15 +195,24 @@ impl Scanner for Uninstaller {
                 // Only flag reverse-DNS names (likely bundle ids), not plain folders,
                 // and never Apple system-app data (see protection.rs).
                 if is_orphan_key(&key) {
-                    let size = if p.is_dir() { dir_size(&p, 8) } else { p.metadata().map(|m| m.len()).unwrap_or(0) };
+                    let size = if p.is_dir() {
+                        dir_size(&p, 8)
+                    } else {
+                        p.metadata().map(|m| m.len()).unwrap_or(0)
+                    };
                     if size > 1024 * 1024 {
-                        out.push(JunkItem::new(p, size, "Orphan data"));
+                        out.push(unselected(p, size, "Possible orphan"));
                     }
                 }
             }
         }
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        on_progress(Progress { done: 2, total: 2, bytes: out.iter().map(|j| j.size).sum(), label: "done".into() });
+        on_progress(Progress {
+            done: 2,
+            total: 2,
+            bytes: out.iter().map(|j| j.size).sum(),
+            label: "done".into(),
+        });
         out
     }
 }
@@ -172,7 +222,8 @@ mod tests {
     use super::*;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sweep-uninstaller-{tag}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("sweep-uninstaller-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -181,10 +232,15 @@ mod tests {
     fn short_bid_yields_no_bare_parent_candidate() {
         let h = tmp_dir("vendor-guard");
         std::fs::create_dir_all(h.join("Library/Application Support")).unwrap();
-        let app = AppInfo { name: "Foo".into(), path: h.join("Foo.app"), bid: Some("com.foo".into()) };
+        let app = AppInfo {
+            name: "Foo".into(),
+            path: h.join("Foo.app"),
+            bid: Some("com.foo".into()),
+        };
         let got = candidates_for(&app, &h);
         assert!(
-            !got.iter().any(|p| *p == h.join("Library/Application Support")),
+            !got.iter()
+                .any(|p| *p == h.join("Library/Application Support")),
             "bare parent must never be a candidate: {got:?}"
         );
         std::fs::remove_dir_all(&h).ok();
@@ -205,8 +261,14 @@ mod tests {
         std::fs::create_dir_all(root.join("Bar.app/Contents")).unwrap();
         let mut out = Vec::new();
         scan_apps_dir(&root, &mut out);
-        assert!(out.iter().any(|a| a.name == "Foo"), "nested app missing: {out:?}");
-        assert!(out.iter().any(|a| a.name == "Bar"), "top-level app missing: {out:?}");
+        assert!(
+            out.iter().any(|a| a.name == "Foo"),
+            "nested app missing: {out:?}"
+        );
+        assert!(
+            out.iter().any(|a| a.name == "Bar"),
+            "top-level app missing: {out:?}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

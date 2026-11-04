@@ -26,6 +26,7 @@ case "$cmd" in
     echo "uninstalled"
     ;;
   on)
+    mkdir -p "$HOME/Library/LaunchAgents"
     sed "s#/Applications/SweepMac.app#$(printf %s "/Applications/$APP_NAME")#" \
       "$ROOT/packaging/com.sweepmac.app.plist" > "$PLIST"
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true

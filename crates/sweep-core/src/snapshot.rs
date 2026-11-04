@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 /// Real snapshots dir.
 pub fn dir() -> PathBuf {
-    crate::home().join(".sweepmac/snapshots")
+    crate::home()
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .join(".sweepmac/snapshots")
 }
 
 fn now_secs() -> u64 {
@@ -78,12 +80,8 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
         .ok()
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path().extension().map(|x| x == "json").unwrap_or(false)
-                })
-                .filter_map(|e| {
-                    e.file_name().into_string().ok()
-                })
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .filter_map(|e| e.file_name().into_string().ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -94,6 +92,9 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 
 /// Snapshot to the real dir.
 pub fn save(items: &[(PathBuf, u64, String)]) -> Result<PathBuf, String> {
+    if crate::home().is_none() {
+        return Err("HOME is not set".into());
+    }
     save_to(&dir(), items)
 }
 
@@ -107,11 +108,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let d = std::env::temp_dir().join(format!(
-            "sweep-snap-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let d = std::env::temp_dir().join(format!("sweep-snap-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

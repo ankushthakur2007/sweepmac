@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use sweep_core::{dir_size, home, JunkItem, Progress, Scanner};
 
 fn roots() -> Vec<PathBuf> {
-    let h = home();
+    let Some(h) = home() else {
+        return vec![PathBuf::from("/Applications")];
+    };
     vec![
         h.clone(),
         h.join("Library"),
@@ -22,9 +24,10 @@ fn prune_roots_canonical(canonical: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
         .iter()
         .enumerate()
         .filter(|(i, (_, c))| {
-            !canonical.iter().enumerate().any(|(j, (_, o))| {
-                j != *i && c.starts_with(o) && (c != o || j < *i)
-            })
+            !canonical
+                .iter()
+                .enumerate()
+                .any(|(j, (_, o))| j != *i && c.starts_with(o) && (c != o || j < *i))
         })
         .map(|(_, (orig, _))| orig.clone())
         .collect()
@@ -39,14 +42,21 @@ fn prune_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 /// One unselected JunkItem per top-level child dir of `root`; unreadable skipped.
 fn children_sizes(root: &Path) -> Vec<JunkItem> {
-    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
     rd.filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir() && !p.is_symlink())
         .filter(|p| !sweep_core::is_protected(p))
         .filter_map(|p| {
             let size = dir_size(&p, 6);
-            (size > 0).then(|| JunkItem { path: p, size, category: "Folder".into(), selected: false })
+            (size > 0).then(|| JunkItem {
+                path: p,
+                size,
+                category: "Folder".into(),
+                selected: false,
+            })
         })
         .collect()
 }
@@ -65,7 +75,10 @@ impl Scanner for SpaceLens {
         let total = existing.len() as u64;
         let mut out = Vec::new();
         std::thread::scope(|s| {
-            let handles: Vec<_> = existing.iter().map(|r| s.spawn(|| children_sizes(r))).collect();
+            let handles: Vec<_> = existing
+                .iter()
+                .map(|r| s.spawn(|| children_sizes(r)))
+                .collect();
             for (i, (root, h)) in existing.iter().zip(handles).enumerate() {
                 out.extend(h.join().unwrap_or_default());
                 on_progress(Progress {
@@ -127,10 +140,19 @@ mod tests {
     fn prune_nested_pairs_collapse_to_outermost() {
         let pairs = vec![
             (PathBuf::from("/home/u"), PathBuf::from("/home/u")),
-            (PathBuf::from("/home/u/Library"), PathBuf::from("/home/u/Library")),
-            (PathBuf::from("/home/u/Documents"), PathBuf::from("/home/u/Documents")),
+            (
+                PathBuf::from("/home/u/Library"),
+                PathBuf::from("/home/u/Library"),
+            ),
+            (
+                PathBuf::from("/home/u/Documents"),
+                PathBuf::from("/home/u/Documents"),
+            ),
         ];
-        assert_eq!(prune_roots_canonical(&pairs), vec![PathBuf::from("/home/u")]);
+        assert_eq!(
+            prune_roots_canonical(&pairs),
+            vec![PathBuf::from("/home/u")]
+        );
     }
 
     #[test]

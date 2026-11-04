@@ -3,21 +3,23 @@
 use std::path::{Path, PathBuf};
 use sweep_core::{dir_size, home, JunkItem, Progress, Scanner};
 
-pub mod uninstaller;
-pub mod spacelens;
-pub mod privacy;
-pub mod performance;
-pub mod protection;
-pub mod clutter;
-pub mod sigupdate;
-pub mod malware;
 pub mod clamsetup;
+pub mod clutter;
+pub mod malware;
+pub mod performance;
+pub mod privacy;
+pub mod protection;
+pub mod sigupdate;
+pub mod spacelens;
+pub mod uninstaller;
 
 /// One item per top-level subdirectory of a big container root.
 /// Pure over `path` so tests can point it at a temp dir.
 fn items_for_root(name: &str, path: &Path) -> Vec<JunkItem> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(path) else { return out };
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return out;
+    };
     for entry in rd.filter_map(|e| e.ok()) {
         let p = entry.path();
         if sweep_core::is_protected(&p) {
@@ -28,7 +30,10 @@ fn items_for_root(name: &str, path: &Path) -> Vec<JunkItem> {
         }
         let size = dir_size(&p, 6);
         if size > 0 {
-            let child = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let child = p
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             out.push(JunkItem::new(p, size, &format!("{name} · {child}")));
         }
     }
@@ -38,11 +43,26 @@ fn items_for_root(name: &str, path: &Path) -> Vec<JunkItem> {
 /// Hardcoded per-app junk locations (mirrors their CMCachesKnowledgeBase rows).
 fn app_junk_roots(h: &Path) -> Vec<(&'static str, PathBuf)> {
     let subs = [
-        ("Spotify cache", "Library/Application Support/Spotify/PersistentCache/Storage"),
-        ("Telegram cache", "Library/Application Support/Telegram Desktop/tdata/user_data"),
-        ("Adobe media cache", "Library/Application Support/Adobe/Common/Media Cache Files"),
-        ("Tencent WeChat", "Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support"),
-        ("Tencent QQMusic", "Library/Containers/com.tencent.QQMusicMac/Data/Library/Application Support"),
+        (
+            "Spotify cache",
+            "Library/Application Support/Spotify/PersistentCache/Storage",
+        ),
+        (
+            "Telegram cache",
+            "Library/Application Support/Telegram Desktop/tdata/user_data",
+        ),
+        (
+            "Adobe media cache",
+            "Library/Application Support/Adobe/Common/Media Cache Files",
+        ),
+        (
+            "Tencent WeChat",
+            "Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support",
+        ),
+        (
+            "Tencent QQMusic",
+            "Library/Containers/com.tencent.QQMusicMac/Data/Library/Application Support",
+        ),
     ];
     subs.into_iter().map(|(n, s)| (n, h.join(s))).collect()
 }
@@ -57,11 +77,23 @@ impl Scanner for SystemJunk {
         "System Junk"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        let h = home();
+        let Some(h) = home() else {
+            on_progress(Progress {
+                done: 0,
+                total: 0,
+                bytes: 0,
+                label: "done".into(),
+            });
+            return Vec::new();
+        };
         let mut roots: Vec<(String, PathBuf, bool)> = vec![
             ("User caches".into(), h.join("Library/Caches"), true),
             ("User logs".into(), h.join("Library/Logs"), true),
-            ("Xcode derived data".into(), h.join("Library/Developer/Xcode/DerivedData"), true),
+            (
+                "Xcode derived data".into(),
+                h.join("Library/Developer/Xcode/DerivedData"),
+                true,
+            ),
         ];
         for (n, p) in app_junk_roots(&h) {
             roots.push((n.to_string(), p, false));
@@ -90,7 +122,12 @@ impl Scanner for SystemJunk {
                 }
             }
         }
-        on_progress(Progress { done: total, total, bytes: out.iter().map(|j| j.size).sum(), label: "done".into() });
+        on_progress(Progress {
+            done: total,
+            total,
+            bytes: out.iter().map(|j| j.size).sum(),
+            label: "done".into(),
+        });
         out.sort_by(|a, b| b.size.cmp(&a.size));
         out
     }
@@ -106,8 +143,22 @@ impl Scanner for TrashBin {
         "Trash"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        let trash = home().join(".Trash");
-        on_progress(Progress { done: 0, total: 1, bytes: 0, label: "Trash".into() });
+        let Some(h) = home() else {
+            on_progress(Progress {
+                done: 0,
+                total: 1,
+                bytes: 0,
+                label: "done".into(),
+            });
+            return Vec::new();
+        };
+        let trash = h.join(".Trash");
+        on_progress(Progress {
+            done: 0,
+            total: 1,
+            bytes: 0,
+            label: "Trash".into(),
+        });
         let mut out = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&trash) {
             for entry in rd.filter_map(|e| e.ok()) {
@@ -115,14 +166,23 @@ impl Scanner for TrashBin {
                 if sweep_core::is_protected(&p) {
                     continue;
                 }
-                let size = if p.is_dir() { dir_size(&p, 8) } else { entry.metadata().map(|m| m.len()).unwrap_or(0) };
+                let size = if p.is_dir() {
+                    dir_size(&p, 8)
+                } else {
+                    entry.metadata().map(|m| m.len()).unwrap_or(0)
+                };
                 if size > 0 {
                     out.push(JunkItem::new(p, size, "Trash"));
                 }
             }
         }
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        on_progress(Progress { done: 1, total: 1, bytes: out.iter().map(|j| j.size).sum(), label: "done".into() });
+        on_progress(Progress {
+            done: 1,
+            total: 1,
+            bytes: out.iter().map(|j| j.size).sum(),
+            label: "done".into(),
+        });
         out
     }
 }
@@ -154,7 +214,10 @@ pub fn performance() -> Vec<Box<dyn Scanner>> {
 
 /// P2: suspicious-file scanners (audit-only).
 pub fn protection() -> Vec<Box<dyn Scanner>> {
-    vec![Box::new(protection::Protection), Box::new(malware::Malware::default())]
+    vec![
+        Box::new(protection::Protection),
+        Box::new(malware::Malware::default()),
+    ]
 }
 
 /// P3: old-and-large-file scanners.
@@ -168,7 +231,11 @@ mod tests {
     use std::fs;
 
     fn tmp_root(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("sweep-test-{}-{}-{tag}", std::process::id(), line!()));
+        let p = std::env::temp_dir().join(format!(
+            "sweep-test-{}-{}-{tag}",
+            std::process::id(),
+            line!()
+        ));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p

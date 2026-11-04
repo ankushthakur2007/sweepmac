@@ -2,13 +2,16 @@
 //! The user never touches a terminal; the Protection page drives this.
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
-fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+pub fn home() -> Option<PathBuf> {
+    sweep_core::home()
 }
 
 pub fn conf_dir() -> PathBuf {
-    home().join(".sweepmac/clamav")
+    home()
+        .map(|h| h.join(".sweepmac/clamav"))
+        .unwrap_or_else(|| PathBuf::from("/.sweepmac/clamav"))
 }
 
 pub fn db_dir() -> PathBuf {
@@ -16,7 +19,14 @@ pub fn db_dir() -> PathBuf {
 }
 
 fn find_bin(name: &str) -> Option<PathBuf> {
-    for dir in ["/opt/homebrew/sbin", "/opt/homebrew/bin", "/usr/local/sbin", "/usr/local/bin", "/opt/local/bin", "/opt/local/sbin"] {
+    for dir in [
+        "/opt/homebrew/sbin",
+        "/opt/homebrew/bin",
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+        "/opt/local/sbin",
+    ] {
         let p = Path::new(dir).join(name);
         if p.is_file() {
             return Some(p);
@@ -99,19 +109,68 @@ fn ping_clamd() -> bool {
     crate::malware::ClamClient::new("127.0.0.1:3310").ping()
 }
 
-fn run(cmd: &Path, args: &[&str], tx: &Sender<String>) -> bool {
-    tx.send(format!("$ {} {}", cmd.display(), args.join(" "))).ok();
-    match std::process::Command::new(cmd).args(args).output() {
-        Ok(o) => {
+const RUN_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub fn run(cmd: &Path, args: &[&str], tx: &Sender<String>) -> bool {
+    tx.send(format!("$ {} {}", cmd.display(), args.join(" ")))
+        .ok();
+    let child = match std::process::Command::new(cmd)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tx.send(format!("failed to run {}: {e}", cmd.display()))
+                .ok();
+            return false;
+        }
+    };
+    let pid = child.id();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = child.wait_with_output();
+        let _ = done_tx.send(out);
+    });
+    match done_rx.recv_timeout(RUN_TIMEOUT) {
+        Ok(Ok(o)) => {
             let tail = String::from_utf8_lossy(&o.stdout);
-            let tail: String = tail.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let tail: String = tail
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             if !tail.is_empty() {
                 tx.send(tail).ok();
             }
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !err.trim().is_empty() {
+                tx.send(err.trim().to_string()).ok();
+            }
             o.status.success()
         }
-        Err(e) => {
-            tx.send(format!("failed to run {}: {e}", cmd.display())).ok();
+        Ok(Err(e)) => {
+            tx.send(format!("failed to run {}: {e}", cmd.display()))
+                .ok();
+            false
+        }
+        Err(_) => {
+            // Kill timed-out child.
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output();
+            tx.send(format!(
+                "{} timed out after {}s",
+                cmd.display(),
+                RUN_TIMEOUT.as_secs()
+            ))
+            .ok();
             false
         }
     }
@@ -153,11 +212,17 @@ pub fn setup(tx: Sender<String>) {
 
     // 3. Signatures.
     let Some(freshclam) = find_bin("freshclam") else {
-        tx.send("freshclam not found — reinstall ClamAV.".into()).ok();
+        tx.send("freshclam not found — reinstall ClamAV.".into())
+            .ok();
         return;
     };
-    tx.send("Downloading signatures (first run is large)…".into()).ok();
-    run(&freshclam, &["--config-file", &fresh_path.to_string_lossy()], &tx);
+    tx.send("Downloading signatures (first run is large)…".into())
+        .ok();
+    run(
+        &freshclam,
+        &["--config-file", &fresh_path.to_string_lossy()],
+        &tx,
+    );
 
     // 4. Daemon.
     if ping_clamd() {
@@ -185,7 +250,8 @@ pub fn setup(tx: Sender<String>) {
                     return;
                 }
             }
-            tx.send("clamd started but not answering yet — retry shortly.".into()).ok();
+            tx.send("clamd started but not answering yet — retry shortly.".into())
+                .ok();
         }
         Err(e) => {
             tx.send(format!("cannot launch clamd: {e}")).ok();
@@ -203,7 +269,10 @@ mod tests {
             needs_install(false, false),
             "Homebrew not found — install it from https://brew.sh first."
         );
-        assert_eq!(needs_install(false, true), "Installing ClamAV (this takes a minute)…");
+        assert_eq!(
+            needs_install(false, true),
+            "Installing ClamAV (this takes a minute)…"
+        );
         assert_eq!(needs_install(true, false), "");
         assert_eq!(needs_install(true, true), "");
     }

@@ -62,7 +62,9 @@ fn mem_pressure() -> Option<u8> {
         if total == 0 {
             return None;
         }
-        let used = stats.active_count as u64 + stats.wire_count as u64 + stats.compressor_page_count as u64;
+        let used = stats.active_count as u64
+            + stats.wire_count as u64
+            + stats.compressor_page_count as u64;
         Some(((used * 100) / total).min(100) as u8)
     }
 }
@@ -137,8 +139,8 @@ fn net_counters() -> Option<(u64, u64)> {
                 let is_utun = n.starts_with(b"utun");
                 if is_utun || n.starts_with(b"en") {
                     let d = &*(ifa.ifa_data as *const libc::if_data);
-                    let t = (if is_utun { &mut utun_tot } else { &mut en_tot })
-                        .get_or_insert((0, 0));
+                    let t =
+                        (if is_utun { &mut utun_tot } else { &mut en_tot }).get_or_insert((0, 0));
                     t.0 = t.0.wrapping_add(d.ifi_ibytes as u64);
                     t.1 = t.1.wrapping_add(d.ifi_obytes as u64);
                 }
@@ -152,7 +154,12 @@ fn net_counters() -> Option<(u64, u64)> {
 
 /// Pure rate math: bits per second from two counter samples. saturating_sub
 /// treats counter resets as zero delta instead of a giant spike.
-fn net_rates(prev: (u64, u64), prev_at: Instant, cur: (u64, u64), now: Instant) -> Option<(u64, u64)> {
+fn net_rates(
+    prev: (u64, u64),
+    prev_at: Instant,
+    cur: (u64, u64),
+    now: Instant,
+) -> Option<(u64, u64)> {
     let secs = now.checked_duration_since(prev_at)?.as_secs_f64();
     if !(secs > 0.0) {
         return None;
@@ -323,15 +330,24 @@ impl Sampler {
 
     pub fn tick(&mut self) -> Health {
         let now = Instant::now();
-        if self.battery_at.is_none_or(|t| t.elapsed() > Duration::from_secs(BATTERY_SECS)) {
+        if self
+            .battery_at
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(BATTERY_SECS))
+        {
             self.battery = battery();
             self.battery_at = Some(now);
         }
-        if self.thermal_at.is_none_or(|t| t.elapsed() > Duration::from_secs(THERMAL_SECS)) {
+        if self
+            .thermal_at
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(THERMAL_SECS))
+        {
             self.thermal = thermal();
             self.thermal_at = Some(now);
         }
-        if self.bt_at.is_none_or(|t| t.elapsed() > Duration::from_secs(BT_SECS)) {
+        if self
+            .bt_at
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(BT_SECS))
+        {
             self.bt = bt_battery();
             self.bt_at = Some(now);
         }
@@ -367,7 +383,10 @@ mod tests {
     #[test]
     fn vpn_tunnels_preferred_over_physical() {
         // utun present: report it alone (en* would double-count its bytes).
-        assert_eq!(pick_net_totals(Some((100, 200)), Some((100, 200))), (100, 200));
+        assert_eq!(
+            pick_net_totals(Some((100, 200)), Some((100, 200))),
+            (100, 200)
+        );
         assert_eq!(pick_net_totals(Some((100, 200)), Some((5, 6))), (5, 6));
         // No VPN: fall back to en*.
         assert_eq!(pick_net_totals(Some((100, 200)), None), (100, 200));
@@ -376,7 +395,7 @@ mod tests {
 
     #[test]
     fn disk_numbers_sane() {
-        if let (Some(f), Some(t)) = (statvfs_free_total("/").unzip()) {
+        if let (Some(f), Some(t)) = statvfs_free_total("/").unzip() {
             assert!(f <= t && t > 0);
         }
     }
@@ -408,9 +427,13 @@ mod tests {
 
     #[test]
     fn thermal_and_bt_parsers() {
-        assert_eq!(parse_thermal("CPU die temperature: 58.25 C\n").as_deref(), Some("58.25 C"));
+        assert_eq!(
+            parse_thermal("CPU die temperature: 58.25 C\n").as_deref(),
+            Some("58.25 C")
+        );
         assert!(parse_thermal("nothing here").is_none());
-        let js = r#"{"AirPods Pro" : {"device_batteryLevelMain" : "82%", "device_address" : "AA"}}"#;
+        let js =
+            r#"{"AirPods Pro" : {"device_batteryLevelMain" : "82%", "device_address" : "AA"}}"#;
         assert_eq!(parse_bt_battery(js).as_deref(), Some("AirPods Pro 82%"));
         assert!(parse_bt_battery("{}").is_none());
     }

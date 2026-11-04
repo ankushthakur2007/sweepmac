@@ -11,12 +11,12 @@ pub enum LoginState {
 
 const LABEL: &str = "com.sweepmac.app";
 
-fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+fn home() -> Option<PathBuf> {
+    sweep_core::home()
 }
 
-fn agent_plist() -> PathBuf {
-    home().join(format!("Library/LaunchAgents/{LABEL}.plist"))
+fn agent_plist() -> Option<PathBuf> {
+    home().map(|h| h.join(format!("Library/LaunchAgents/{LABEL}.plist")))
 }
 
 fn uid() -> Option<String> {
@@ -29,7 +29,15 @@ fn uid() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn plist_body(exe: &str) -> String {
+    let exe = xml_escape(exe);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -59,7 +67,10 @@ fn is_loaded() -> bool {
 }
 
 pub fn status() -> LoginState {
-    if !agent_plist().is_file() {
+    let Some(plist) = agent_plist() else {
+        return LoginState::NotRegistered;
+    };
+    if !plist.is_file() {
         return LoginState::NotRegistered;
     }
     if is_loaded() {
@@ -72,7 +83,7 @@ pub fn status() -> LoginState {
 }
 
 pub fn set_enabled(enable: bool) -> Result<String, String> {
-    let plist = agent_plist();
+    let plist = agent_plist().ok_or_else(|| "no safe home directory".to_string())?;
     let Some(uid) = uid() else {
         return Err("cannot determine user id".to_string());
     };

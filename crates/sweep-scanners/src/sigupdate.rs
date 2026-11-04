@@ -12,13 +12,18 @@ pub enum ClamStatus {
 }
 
 fn age_days(mtime: SystemTime, now: SystemTime) -> u64 {
-    now.duration_since(mtime).map(|d| d.as_secs() / 86_400).unwrap_or(0)
+    now.duration_since(mtime)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    p.is_file() && p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    p.is_file()
+        && p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
 }
 
 #[cfg(not(unix))]
@@ -31,9 +36,9 @@ fn bin_found(bin: &str) -> bool {
     if bin.contains('/') {
         return is_executable(Path::new(bin));
     }
-    std::env::var_os("PATH").map(|paths| {
-        std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(bin)))
-    }).unwrap_or(false)
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(bin))))
+        .unwrap_or(false)
 }
 
 /// Newest daily db age across `db_dirs`; `None` when no db file exists.
@@ -46,7 +51,10 @@ fn newest_db_age_days(db_dirs: &[PathBuf]) -> Option<u64> {
             if let Ok(meta) = std::fs::metadata(&p) {
                 if meta.is_file() {
                     // Unreadable mtime: treat as infinitely stale rather than Ready.
-                    let age = meta.modified().map(|m| age_days(m, now)).unwrap_or(u64::MAX);
+                    let age = meta
+                        .modified()
+                        .map(|m| age_days(m, now))
+                        .unwrap_or(u64::MAX);
                     best = Some(best.map_or(age, |b| b.min(age)));
                 }
             }
@@ -125,8 +133,12 @@ mod tests {
     static N: AtomicU64 = AtomicU64::new(0);
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("sigupdate-{}-{}-{}", std::process::id(), tag, N.fetch_add(1, Ordering::SeqCst)));
+        let d = std::env::temp_dir().join(format!(
+            "sigupdate-{}-{}-{}",
+            std::process::id(),
+            tag,
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -139,7 +151,10 @@ mod tests {
     fn ready_when_db_fresh() {
         let d = tmpdir("fresh");
         touch(&d.join("daily.cvd"));
-        assert_eq!(clamav_status(&[d], &[]), ClamStatus::Ready { sig_age_days: 0 });
+        assert_eq!(
+            clamav_status(&[d], &[]),
+            ClamStatus::Ready { sig_age_days: 0 }
+        );
     }
 
     #[test]
@@ -148,7 +163,12 @@ mod tests {
         let f = d.join("daily.cld");
         touch(&f);
         // `touch -t` is supported by both BSD (macOS) and GNU touch.
-        let ok = std::process::Command::new("touch").args(["-t", "200001010000"]).arg(&f).status().map(|s| s.success()).unwrap_or(false);
+        let ok = std::process::Command::new("touch")
+            .args(["-t", "200001010000"])
+            .arg(&f)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
         if !ok {
             return; // shortcut: platform without touch -t, age math covered by newest_db_age_days logic
         }
@@ -163,12 +183,20 @@ mod tests {
         let d = tmpdir("mixed");
         let old = d.join("daily.cvd");
         touch(&old);
-        let ok = std::process::Command::new("touch").args(["-t", "200001010000"]).arg(&old).status().map(|s| s.success()).unwrap_or(false);
+        let ok = std::process::Command::new("touch")
+            .args(["-t", "200001010000"])
+            .arg(&old)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
         if !ok {
             return;
         }
         touch(&d.join("daily.cld")); // fresh
-        assert_eq!(clamav_status(&[d], &[]), ClamStatus::Ready { sig_age_days: 0 });
+        assert_eq!(
+            clamav_status(&[d], &[]),
+            ClamStatus::Ready { sig_age_days: 0 }
+        );
     }
 
     #[test]

@@ -16,7 +16,12 @@ pub struct JunkItem {
 
 impl JunkItem {
     pub fn new(path: PathBuf, size: u64, category: &str) -> Self {
-        Self { path, size, category: category.into(), selected: true }
+        Self {
+            path,
+            size,
+            category: category.into(),
+            selected: true,
+        }
     }
 }
 
@@ -34,6 +39,9 @@ pub trait Scanner: Send {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem>;
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 /// Result of a clean pass.
@@ -44,9 +52,12 @@ pub struct CleanResult {
     pub errors: Vec<String>,
 }
 
-/// Home dir, `/` fallback (keeps scanners total: no panics on odd envs).
-pub fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+/// Home dir, None if HOME missing/invalid.
+pub fn home() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
 }
 
 /// Sum of file sizes under `dir` (bounded depth, symlink-safe, errors ignored).
@@ -76,7 +87,9 @@ pub fn is_protected(p: &std::path::Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::os::darwin::fs::MetadataExt;
-        std::fs::metadata(p).map(|m| m.st_flags() & 0x80000 != 0).unwrap_or(false)
+        std::fs::metadata(p)
+            .map(|m| m.st_flags() & 0x80000 != 0)
+            .unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -93,18 +106,31 @@ pub fn unselected(path: PathBuf, size: u64, category: &str) -> JunkItem {
 }
 
 /// Move paths to the Trash (never hard-delete in P0).
+/// Batch first via trash::delete_all; fall back per-item on failure.
 pub fn trash_paths(paths: &[PathBuf]) -> CleanResult {
     let mut out = CleanResult::default();
-    for p in paths {
-        match trash::delete(p) {
-            Ok(()) => out.removed += 1,
-            Err(e) => out.errors.push(format!("{}: {e}", p.display())),
+    if paths.is_empty() {
+        return out;
+    }
+    match trash::delete_all(paths) {
+        Ok(()) => {
+            out.removed += paths.len() as u64;
+            return out;
+        }
+        Err(_) => {
+            for p in paths {
+                match trash::delete(p) {
+                    Ok(()) => out.removed += 1,
+                    Err(e) => out.errors.push(format!("{}: {e}", p.display())),
+                }
+            }
         }
     }
     out
 }
 
-pub fn fmt_bytes(n: u64) -> String {    const U: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+pub fn fmt_bytes(n: u64) -> String {
+    const U: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut u = 0;
     while v >= 1024.0 && u + 1 < U.len() {

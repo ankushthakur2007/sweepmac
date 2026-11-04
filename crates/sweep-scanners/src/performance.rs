@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use sweep_core::{file_size, home, unselected, JunkItem, Progress, Scanner};
 
 fn disabled_dir() -> PathBuf {
-    home().join(".sweepmac/disabled")
+    home()
+        .map(|h| h.join(".sweepmac/disabled"))
+        .unwrap_or_else(|| PathBuf::from("/.sweepmac/disabled"))
 }
 
 fn current_uid() -> Option<String> {
@@ -26,7 +28,9 @@ fn backup_index(file_name: &str, label: &str) -> Option<u64> {
         return Some(1);
     }
     let (prefix, suffix) = (format!("{label}-"), ".plist");
-    let n = file_name.strip_prefix(prefix.as_str())?.strip_suffix(suffix)?;
+    let n = file_name
+        .strip_prefix(prefix.as_str())?
+        .strip_suffix(suffix)?;
     n.parse::<u64>().ok().filter(|&n| n >= 2)
 }
 
@@ -56,7 +60,10 @@ fn is_launch_agent(data: &[u8]) -> bool {
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
         .and_then(|v| v.as_string());
-    let _run_at_load = dict.get("RunAtLoad").and_then(|v| v.as_boolean()).unwrap_or(false);
+    let _run_at_load = dict
+        .get("RunAtLoad")
+        .and_then(|v| v.as_boolean())
+        .unwrap_or(false);
     true
 }
 
@@ -135,16 +142,28 @@ pub fn disable(item: &JunkItem) -> Result<String, String> {
         .ok_or_else(|| format!("too many backups for {label} (limit 100)"))?;
     std::fs::rename(&item.path, &dest).map_err(|e| e.to_string())?;
     let Some(uid) = current_uid() else {
-        return Ok(format!("Disabled {label} (moved to {}; uid lookup failed, skipped bootout)", dest.display()));
+        return Ok(format!(
+            "Disabled {label} (moved to {}; uid lookup failed, skipped bootout)",
+            dest.display()
+        ));
     };
     let target = format!("gui/{uid}/{label}");
-    match std::process::Command::new("launchctl").args(["bootout", &target]).output() {
+    match std::process::Command::new("launchctl")
+        .args(["bootout", &target])
+        .output()
+    {
         Ok(o) if o.status.success() => Ok(format!("Disabled {label}")),
         Ok(o) => {
             let err = String::from_utf8_lossy(&o.stderr).trim().to_owned();
-            Ok(format!("Disabled {label} (moved to {}; bootout warning: {err})", dest.display()))
+            Ok(format!(
+                "Disabled {label} (moved to {}; bootout warning: {err})",
+                dest.display()
+            ))
         }
-        Err(e) => Ok(format!("Disabled {label} (moved to {}; bootout warning: {e})", dest.display())),
+        Err(e) => Ok(format!(
+            "Disabled {label} (moved to {}; bootout warning: {e})",
+            dest.display()
+        )),
     }
 }
 
@@ -173,9 +192,15 @@ pub fn restore(label: &str) -> Result<String, String> {
         .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
         .map(|(_, _, p)| p)
         .ok_or_else(|| format!("no backup found for {label}"))?;
-    let dest = home().join("Library/LaunchAgents").join(format!("{label}.plist"));
+    let dest = home()
+        .map(|h| h.join("Library/LaunchAgents"))
+        .unwrap_or_else(|| PathBuf::from("/Library/LaunchAgents"))
+        .join(format!("{label}.plist"));
     if dest.exists() {
-        return Err(format!("{} already exists, refusing to overwrite", dest.display()));
+        return Err(format!(
+            "{} already exists, refusing to overwrite",
+            dest.display()
+        ));
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -197,11 +222,29 @@ impl Scanner for Performance {
         "Startup Items"
     }
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> Vec<JunkItem> {
-        on_progress(Progress { done: 0, total: 1, bytes: 0, label: "Startup Items".into() });
-        let h = home();
+        on_progress(Progress {
+            done: 0,
+            total: 1,
+            bytes: 0,
+            label: "Startup Items".into(),
+        });
+        let h = match home() {
+            Some(h) => h,
+            None => {
+                // No safe home: only scan system-wide agents, skip user paths.
+                let mut out = Vec::new();
+                out.extend(items_from_launch_agents(&PathBuf::from(
+                    "/Library/LaunchAgents",
+                )));
+                out.sort_by(|a, b| b.size.cmp(&a.size));
+                return out;
+            }
+        };
         let mut out = Vec::new();
         out.extend(items_from_launch_agents(&h.join("Library/LaunchAgents")));
-        out.extend(items_from_launch_agents(&PathBuf::from("/Library/LaunchAgents")));
+        out.extend(items_from_launch_agents(&PathBuf::from(
+            "/Library/LaunchAgents",
+        )));
         out.extend(items_from_loginwindow(
             &h.join("Library/Preferences/com.apple.loginwindow.plist"),
         ));
@@ -253,7 +296,9 @@ mod tests {
     // HOME is process-global; serialize tests that stub it.
     fn home_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap()
     }
 
     struct HomeGuard {
@@ -282,7 +327,9 @@ mod tests {
         std::fs::write(dir.join("com.example.test.plist"), AGENT_PLIST).unwrap();
         let items = items_from_launch_agents(&dir);
         assert_eq!(items.len(), 1);
-        assert!(items.iter().all(|i| i.category == "Login item" && !i.selected));
+        assert!(items
+            .iter()
+            .all(|i| i.category == "Login item" && !i.selected));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -302,7 +349,9 @@ mod tests {
     fn full_scan_never_panics() {
         // No HOME stubbing: passes on any machine, real entries or not.
         let items = Performance.scan(&|_| {});
-        assert!(items.iter().all(|i| i.category == "Login item" && !i.selected));
+        assert!(items
+            .iter()
+            .all(|i| i.category == "Login item" && !i.selected));
     }
 
     #[test]
@@ -317,7 +366,9 @@ mod tests {
         let msg = disable(&item).expect("disable should succeed");
         assert!(msg.contains("com.example.disableme"), "msg: {msg}");
         assert!(!src.exists(), "original plist must be gone");
-        assert!(fake_home.join(".sweepmac/disabled/com.example.disableme.plist").is_file());
+        assert!(fake_home
+            .join(".sweepmac/disabled/com.example.disableme.plist")
+            .is_file());
         std::fs::remove_dir_all(&fake_home).ok();
     }
 
@@ -336,7 +387,10 @@ mod tests {
         let first = fake_home.join(format!(".sweepmac/disabled/{label}.plist"));
         let second = fake_home.join(format!(".sweepmac/disabled/{label}-2.plist"));
         assert!(first.is_file(), "first backup must be kept");
-        assert!(second.is_file(), "second disable must use a distinct backup");
+        assert!(
+            second.is_file(),
+            "second disable must use a distinct backup"
+        );
         assert!(!src.exists(), "original plist must be gone");
         std::fs::remove_dir_all(&fake_home).ok();
     }
@@ -355,14 +409,24 @@ mod tests {
         disable(&unselected(src.clone(), file_size(&src), "Login item")).unwrap();
         let msg = restore(label).expect("restore should succeed");
         assert!(msg.contains(label), "msg: {msg}");
-        assert_eq!(std::fs::read_to_string(&src).unwrap(), "v2", "newest backup wins");
-        assert!(restore(label).is_err(), "second restore must refuse (already live)");
+        assert_eq!(
+            std::fs::read_to_string(&src).unwrap(),
+            "v2",
+            "newest backup wins"
+        );
+        assert!(
+            restore(label).is_err(),
+            "second restore must refuse (already live)"
+        );
         std::fs::remove_dir_all(&fake_home).ok();
     }
 
     #[test]
     fn disable_rejects_loginwindow_entries() {
         let item = unselected(PathBuf::from("/Applications/TestApp.app"), 42, "Login item");
-        assert_eq!(disable(&item), Err("loginwindow entries must be removed in System Settings".into()));
+        assert_eq!(
+            disable(&item),
+            Err("loginwindow entries must be removed in System Settings".into())
+        );
     }
 }

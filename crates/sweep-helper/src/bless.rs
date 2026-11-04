@@ -16,7 +16,10 @@ fn xml_escape(s: &str) -> String {
 
 /// App Info.plist snippet: SMPrivilegedExecutables { label: requirement }.
 pub fn app_privileged_executables_plist(team_id: &str, label: &str) -> String {
-    let (l, r) = (xml_escape(label), xml_escape(&requirement_string(team_id, label)));
+    let (l, r) = (
+        xml_escape(label),
+        xml_escape(&requirement_string(team_id, label)),
+    );
     format!("<key>SMPrivilegedExecutables</key>\n<dict>\n\t<key>{l}</key>\n\t<string>{r}</string>\n</dict>")
 }
 

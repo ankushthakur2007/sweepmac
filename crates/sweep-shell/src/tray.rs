@@ -30,7 +30,11 @@ struct TrayCtx {
 }
 
 fn nsstring(s: &str) -> id {
-    unsafe { NSString::alloc(nil).init_str(s) }
+    unsafe {
+        let s = NSString::alloc(nil).init_str(s);
+        let _: () = msg_send![s, autorelease];
+        s
+    }
 }
 
 fn menu_label(title: &str) -> id {
@@ -190,6 +194,10 @@ pub fn unmount() {
             let _: () = msg_send![TRAY_TIMER, invalidate];
             TRAY_TIMER = std::ptr::null_mut();
         }
+        // Retire sampler/scan workers from the previous mount.
+        MOUNT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        HEALTH_RX = None;
+        SCAN_RX = None;
         if !CTX.is_null() {
             let _ = Box::from_raw(CTX as *mut TrayCtx);
             CTX = std::ptr::null();
@@ -229,8 +237,7 @@ pub fn mount() -> bool {
         let target_cls = match Class::get("SweepTrayTargetHost") {
             Some(c) => c,
             None => {
-                let mut decl =
-                    ClassDecl::new("SweepTrayTargetHost", class!(NSObject)).unwrap();
+                let mut decl = ClassDecl::new("SweepTrayTargetHost", class!(NSObject)).unwrap();
                 decl.add_method(sel!(doScan:), on_scan as extern "C" fn(&Object, Sel, id));
                 decl.add_method(sel!(doOpen:), on_open as extern "C" fn(&Object, Sel, id));
                 decl.add_method(sel!(doQuit:), on_quit as extern "C" fn(&Object, Sel, id));
@@ -257,7 +264,16 @@ pub fn mount() -> bool {
             let _: () = msg_send![menu, addItem: item];
         }
 
-        CTX = Box::into_raw(Box::new(TrayCtx { grade, disk, mem, batt, load, net, scan, tx_scan }));
+        CTX = Box::into_raw(Box::new(TrayCtx {
+            grade,
+            disk,
+            mem,
+            batt,
+            load,
+            net,
+            scan,
+            tx_scan,
+        }));
 
         // Status item: SF Symbol template icon (adapts to light/dark bar).
         let bar = NSStatusBar::systemStatusBar(nil);

@@ -65,7 +65,9 @@ fn absolutize(p: &str) -> PathBuf {
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(p)
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(p)
     };
     normalize_lexically(&abs)
 }
@@ -100,17 +102,15 @@ fn count_remaining(dir: &Path) -> usize {
         };
         for e in rd {
             match e {
-                Ok(en) => {
-                    match en.file_type() {
-                        Ok(ft) => {
-                            n += 1;
-                            if ft.is_dir() && !ft.is_symlink() {
-                                stack.push(en.path());
-                            }
+                Ok(en) => match en.file_type() {
+                    Ok(ft) => {
+                        n += 1;
+                        if ft.is_dir() && !ft.is_symlink() {
+                            stack.push(en.path());
                         }
-                        Err(_) => n += 1,
                     }
-                }
+                    Err(_) => n += 1,
+                },
                 Err(_) => n += 1,
             }
         }
@@ -186,12 +186,16 @@ fn console_user_home(user: &str) -> Option<PathBuf> {
 }
 
 fn trash_home() -> PathBuf {
-    let home_fallback =
-        env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/var/root"));
+    let home_fallback = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/root"));
     if euid() != Some(0) {
         return home_fallback;
     }
-    match Command::new("stat").args(["-f%Su", "/dev/console"]).output() {
+    match Command::new("stat")
+        .args(["-f%Su", "/dev/console"])
+        .output()
+    {
         Ok(out) => {
             let u = String::from_utf8_lossy(&out.stdout).into_owned();
             console_user_home(&u).unwrap_or(home_fallback)
@@ -232,7 +236,8 @@ fn do_trash(path: &str) -> Result<(), String> {
         #[cfg(unix)]
         {
             let t = fs::read_link(path).map_err(|e| format!("readlink failed: {e}"))?;
-            std::os::unix::fs::symlink(&t, &dest).map_err(|e| format!("copy symlink failed: {e}"))?;
+            std::os::unix::fs::symlink(&t, &dest)
+                .map_err(|e| format!("copy symlink failed: {e}"))?;
             fs::remove_file(path).map_err(|e| format!("delete after copy failed: {e}"))?;
             return Ok(());
         }
@@ -325,7 +330,11 @@ fn main() {
     let allows: Vec<PathBuf> = allows_raw.iter().map(|a| canon_or_abs(a)).collect();
     let mut failed = false;
     for p in &paths {
-        let r = if cmd == "remove" { do_remove(p, &allows) } else { do_trash(p) };
+        let r = if cmd == "remove" {
+            do_remove(p, &allows)
+        } else {
+            do_trash(p)
+        };
         match &r {
             Ok(()) => emit(p, true, None),
             Err(m) => {
@@ -419,7 +428,10 @@ mod tests {
     fn dotdot_allow_is_normalized() {
         assert_eq!(canon_or_abs("/a/../b"), PathBuf::from("/b"));
         assert!(allowed(&PathBuf::from("/b/x"), &[canon_or_abs("/a/../b")]));
-        assert!(!allowed(&PathBuf::from("/a/evil"), &[canon_or_abs("/a/../b")]));
+        assert!(!allowed(
+            &PathBuf::from("/a/evil"),
+            &[canon_or_abs("/a/../b")]
+        ));
     }
 
     #[test]
