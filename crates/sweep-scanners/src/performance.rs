@@ -28,19 +28,6 @@ fn current_uid() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Suffix index of a backup file name for `label`: `<label>.plist` is 1,
-/// `<label>-N.plist` (N >= 2) is N, anything else is `None`.
-fn backup_index(file_name: &str, label: &str) -> Option<u64> {
-    if file_name == format!("{label}.plist") {
-        return Some(1);
-    }
-    let (prefix, suffix) = (format!("{label}-"), ".plist");
-    let n = file_name
-        .strip_prefix(prefix.as_str())?
-        .strip_suffix(suffix)?;
-    n.parse::<u64>().ok().filter(|&n| n >= 2)
-}
-
 fn backup_path(dir: &Path, label: &str, n: u64) -> PathBuf {
     if n <= 1 {
         dir.join(format!("{label}.plist"))
@@ -192,14 +179,24 @@ pub fn restore(label: &str) -> Result<String, String> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_file())
+        .filter(|p| p.extension().map(|x| x == "plist").unwrap_or(false))
         .filter_map(|p| {
-            let n = backup_index(&p.file_name()?.to_string_lossy(), label)?;
+            let data = std::fs::read(&p).ok()?;
+            let found = plist_label(&data)?;
+            if found != label {
+                return None;
+            }
             let mtime = std::fs::metadata(&p)
                 .and_then(|m| m.modified())
                 .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos());
-            Some((n, mtime, p))
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let stem = p.file_stem()?.to_string_lossy();
+            let suffix = stem
+                .strip_prefix(label)
+                .and_then(|s| s.strip_prefix('-'))
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(1);
+            Some((mtime, suffix, p))
         })
         .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
         .map(|(_, _, p)| p)
@@ -287,6 +284,15 @@ mod tests {
 <dict>
   <key>Label</key><string>com.example.testagent</string>
   <key>ProgramArguments</key><array><string>/usr/bin/true</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>"#;
+    const AGENT_PLIST_V2: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.testagent</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/false</string></array>
   <key>RunAtLoad</key><true/>
 </dict>
 </plist>"#;
@@ -423,13 +429,13 @@ mod tests {
         let src = agent_dir.join(format!("{label}.plist"));
         std::fs::write(&src, AGENT_PLIST).unwrap();
         disable(&unselected(src.clone(), file_size(&src), "Login item")).unwrap();
-        std::fs::write(&src, "v2").unwrap();
+        std::fs::write(&src, AGENT_PLIST_V2).unwrap();
         disable(&unselected(src.clone(), file_size(&src), "Login item")).unwrap();
         let msg = restore(label).expect("restore should succeed");
         assert!(msg.contains(label), "msg: {msg}");
         assert_eq!(
             std::fs::read_to_string(&src).unwrap(),
-            "v2",
+            AGENT_PLIST_V2,
             "newest backup wins"
         );
         assert!(

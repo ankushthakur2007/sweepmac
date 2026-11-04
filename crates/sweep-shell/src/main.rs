@@ -275,7 +275,10 @@ impl ModulePage {
                                     eprintln!("disable note {}: {note}", item.path.display());
                                 }
                             }
-                            Err(e) => out.errors.push(format!("{}: {e}", item.path.display())),
+                            Err(e) => {
+                                out.failed.push(item.path.clone());
+                                out.errors.push(format!("{}: {e}", item.path.display()));
+                            }
                         }
                     }
                 }
@@ -825,8 +828,18 @@ impl SweepApp {
         if self.bulk_rx.is_some() {
             let (msgs, disconnected) = {
                 let rx = self.bulk_rx.as_ref().unwrap();
-                let msgs: Vec<(u8, Vec<JunkItem>)> = rx.try_iter().collect();
-                let disconnected = matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+                let mut msgs: Vec<(u8, Vec<JunkItem>)> = Vec::new();
+                let mut disconnected = false;
+                loop {
+                    match rx.try_recv() {
+                        Ok(m) => msgs.push(m),
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
                 (msgs, disconnected)
             };
             let ignored = ignore::load();

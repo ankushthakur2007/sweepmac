@@ -48,9 +48,6 @@ pub trait Scanner: Send {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
     fn scan(&self, on_progress: &dyn Fn(Progress)) -> ScanOutcome;
-    fn is_available(&self) -> bool {
-        true
-    }
 }
 
 /// Result of a clean pass.
